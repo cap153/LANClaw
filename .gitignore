@@ -4,15 +4,6 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
-# Tauri
-src-tauri/target/
-src-tauri/WixTools/
-
-# Node
-node_modules/
-dist/
-*.log
-
 # IDE
 .vscode/
 .idea/
@@ -24,7 +15,7 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Database
+# Database / state files
 *.db
 *.db-shm
 *.db-wal
@@ -35,3 +26,5 @@ Thumbs.db
 *.so
 *.dylib
 
+# User config (template is tracked, actual config is not)
+config.json

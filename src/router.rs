@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub struct BotConfig {
     pub name: String,
     pub model: String,
+    pub thinking: String,
     pub bot_id: String,
 }
 
@@ -50,11 +51,9 @@ pub async fn handle_message(
     }
 
     // ─── 文件通知处理 ──────────────────────────────────────────────
-    // LANChat 发送文件前会先发一条文本通知，格式如 "[文件] filename (size)"
     let is_file_notification = content.starts_with("[文件]");
 
     if is_file_notification {
-        // 检查 files 目录是否有新文件
         let files_dir = crate::config::files_dir();
         let latest_file = find_latest_file(&files_dir);
 
@@ -67,53 +66,29 @@ pub async fn handle_message(
 
             tracing::info!("[Router] 新文件: {}", file_name);
 
-            // 判断是否为图片
             let is_image = matches!(
                 file_path.extension().and_then(|s| s.to_str()),
                 Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg")
             );
 
-            if is_image {
-                // 图片传给 pi 分析
-                let prompt = format!("分析这张图片的内容，描述你看到的一切。文件名: {}", file_name);
-                let result = pi_bridge::query_pi(&from_id, &prompt, &config.model, &[file_path])
-                    .await;
+            let prompt = if is_image {
+                format!("分析这张图片的内容，描述你看到的一切。文件名: {}", file_name)
+            } else {
+                format!("阅读这个文件 ({}), 总结其内容。如果代码则分析代码。", file_name)
+            };
 
-                match result {
-                    Ok(pi_result) => {
-                        send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config)
-                            .await;
-                        // 发送生成的文件
-                        for f in &pi_result.files {
-                            send_file_to_user(&peers, &from_id, f, config).await;
-                        }
-                    }
-                    Err(e) => {
-                        let reply = format!("❌ 分析图片失败: {}", e);
-                        send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
+            let result = pi_bridge::query_pi(&from_id, &prompt, &config.model, &config.thinking, &[file_path]).await;
+
+            match result {
+                Ok(pi_result) => {
+                    send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config).await;
+                    for f in &pi_result.files {
+                        send_file_to_user(&peers, &from_id, f, config).await;
                     }
                 }
-            } else {
-                // 文档传给 pi 阅读
-                let prompt = format!(
-                    "阅读这个文件 ({})，总结其内容。如果代码则分析代码。",
-                    file_name
-                );
-                let result = pi_bridge::query_pi(&from_id, &prompt, &config.model, &[file_path])
-                    .await;
-
-                match result {
-                    Ok(pi_result) => {
-                        send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config)
-                            .await;
-                        for f in &pi_result.files {
-                            send_file_to_user(&peers, &from_id, f, config).await;
-                        }
-                    }
-                    Err(e) => {
-                        let reply = format!("❌ 读取文件失败: {}", e);
-                        send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
-                    }
+                Err(e) => {
+                    let reply = format!("❌ 分析失败: {}", e);
+                    send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
                 }
             }
         } else {
@@ -124,7 +99,7 @@ pub async fn handle_message(
     }
 
     // ─── 普通文本 → 交给 pi ────────────────────────────────────
-    let result = pi_bridge::query_pi(&from_id, &content, &config.model, &[]).await;
+    let result = pi_bridge::query_pi(&from_id, &content, &config.model, &config.thinking, &[]).await;
 
     match result {
         Ok(pi_result) => {

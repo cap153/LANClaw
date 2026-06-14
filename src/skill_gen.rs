@@ -29,11 +29,12 @@ pub fn generate_skill(bot_name: &str) -> String {
 
 ### 创建单次任务
 ```bash
-lanclaw task add 30min "提醒内容" --user-id <用户ID> --model <模型名>
+lanclaw task add 30min "提醒内容" --user-id <用户ID> [--model <模型名>] [--thinking off]
 lanclaw task add 2026-06-15T09:00 "开会提醒" --user-id <用户ID>
 ```
 - 单次任务到期后自动执行，结果会发给创建者
 - 时间格式: `30min` / `2h` / `2026-06-15T09:00`
+- `--thinking`: off / low / medium / high
 
 ### 创建重复任务
 ```bash

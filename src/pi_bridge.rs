@@ -25,6 +25,7 @@ async fn get_user_lock(user_id: &str) -> Arc<TokioMutex<()>> {
 fn build_pi_command(
     user_id: &str,
     model: &str,
+    thinking: &str,
     files: &[PathBuf],
     message: &str,
 ) -> (Command, String) {
@@ -44,6 +45,12 @@ fn build_pi_command(
     if !model.is_empty() {
         cmd.arg("--model").arg(model);
         log_parts.push(format!("--model {}", model));
+    }
+
+    // 仅当显式指定了 thinking 且不是默认 "off" 时才传 --thinking
+    if !thinking.is_empty() && thinking != "off" {
+        cmd.arg("--thinking").arg(thinking);
+        log_parts.push(format!("--thinking {}", thinking));
     }
 
     cmd.arg("--no-context-files");
@@ -80,13 +87,14 @@ pub async fn query_pi(
     user_id: &str,
     message: &str,
     model: &str,
+    thinking: &str,
     files: &[PathBuf],
 ) -> Result<PiResult, String> {
     // 获取 per-user 锁，防止同一用户并发调用 pi 导致 session 损坏
     let user_lock = get_user_lock(user_id).await;
     let _lock = user_lock.lock().await;
 
-    let (mut cmd, log_cmd) = build_pi_command(user_id, model, files, message);
+    let (mut cmd, log_cmd) = build_pi_command(user_id, model, thinking, files, message);
 
     tracing::info!("[Pi] 执行:\n    {}", log_cmd);
 

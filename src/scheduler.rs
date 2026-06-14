@@ -75,6 +75,7 @@ pub fn add_task(
     creator_id: &str,
     creator_name: &str,
     model: &str,
+    thinking: &str,
 ) -> Result<String, String> {
     let mut store = load_tasks()?;
 
@@ -89,6 +90,7 @@ pub fn add_task(
         schedule,
         prompt: prompt.to_string(),
         model: model.to_string(),
+        thinking: thinking.to_string(),
         created_at: now,
         status: "pending".to_string(),
         logs: Vec::new(),
@@ -196,13 +198,17 @@ pub fn list_tasks() -> Result<String, String> {
         };
 
         let log_count = task.logs.len();
+        let model_info = if task.model.is_empty() { "pi default".to_string() } else { task.model.clone() };
+        let think_info = if task.thinking == "off" { String::new() } else { format!(" | thinking: {}", task.thinking) };
+
         output.push_str(&format!(
-            "  {} [{}] {}\n    创建者: {} | 模型: {}\n    状态: {} | 执行 {} 次\n    内容: {}\n\n",
+            "  {} [{}] {}\n    创建者: {} | 模型: {}{}\n    状态: {} | 执行 {} 次\n    内容: {}\n\n",
             status_icon,
             task.id.chars().take(8).collect::<String>(),
             schedule_str,
             task.creator_name,
-            task.model,
+            model_info,
+            think_info,
             task.status,
             log_count,
             task.prompt.chars().take(100).collect::<String>(),
@@ -343,6 +349,7 @@ async fn tick(send_fn: &Arc<dyn Fn(String, String) + Send + Sync + 'static>) {
             &task_info.creator_id,
             &format!("【定时任务】{}", task_info.prompt),
             &task_info.model,
+            &task_info.thinking,
             &[],
         )
         .await;

@@ -29,6 +29,10 @@ struct Cli {
     #[arg(long)]
     model: Option<String>,
 
+    /// 思考级别: off, minimal, low, medium, high, xhigh
+    #[arg(long, default_value = "off")]
+    thinking: String,
+
     /// 监听端口（与 LANChat 协议兼容）
     #[arg(long, default_value_t = 8888)]
     port: u16,
@@ -68,6 +72,9 @@ enum TaskAction {
         /// 使用的模型（不指定则使用 pi 默认模型）
         #[arg(long)]
         model: Option<String>,
+        /// 思考级别
+        #[arg(long, default_value = "off")]
+        thinking: String,
     },
     /// 列出所有任务
     List,
@@ -106,7 +113,12 @@ async fn main() {
                     user_id,
                     user_name,
                     model,
-                } => match scheduler::add_task(&when, &prompt, &user_id, &user_name, &model.as_deref().unwrap_or_default()) {
+                    thinking,
+                } => match scheduler::add_task(
+                    &when, &prompt, &user_id, &user_name,
+                    &model.as_deref().unwrap_or_default(),
+                    &thinking,
+                ) {
                     Ok(id) => println!("✅ 任务已创建 (ID: {})", id),
                     Err(e) => eprintln!("❌ {}", e),
                 },
@@ -138,12 +150,14 @@ async fn main() {
     // 使用 CLI 参数覆盖配置（不保存到文件）
     let bot_name = if !cli.name.is_empty() { cli.name } else { cfg.name };
     let bot_model = cli.model.clone().unwrap_or(cfg.model);
+    let bot_thinking = cli.thinking.clone();
     let port = cli.port;
 
     println!("  Bot Name:    {}", bot_name);
     println!("  Bot ID:      {}", &bot_id[..8]);
     println!("  Port:        {}", port);
     println!("  Model:       {}", if bot_model.is_empty() { "pi default" } else { &bot_model });
+    println!("  Thinking:    {}", bot_thinking);
     println!();
     println!("  Data:        {}", config::data_dir().display());
     println!("  Sessions:    {}", config::sessions_dir().display());
@@ -166,6 +180,7 @@ async fn main() {
     let bot_config = Arc::new(router::BotConfig {
         name: bot_name.clone(),
         model: bot_model.clone(),
+        thinking: bot_thinking.clone(),
         bot_id: bot_id.clone(),
     });
 

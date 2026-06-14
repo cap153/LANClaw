@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub name: String,
     pub model: String,
+    pub thinking: String,
     pub port: u16,
 }
 
@@ -13,7 +14,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             name: "LANClaw".to_string(),
-            model: String::new(),  // 空 = 使用 pi 默认模型
+            model: String::new(),
+            thinking: "off".to_string(),
             port: 8888,
         }
     }

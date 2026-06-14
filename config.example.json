@@ -1,0 +1,6 @@
+{
+  "name": "PiBot",
+  "model": "",
+  "thinking": "off",
+  "port": 8888
+}

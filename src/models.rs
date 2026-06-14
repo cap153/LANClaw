@@ -65,6 +65,7 @@ pub struct TimerTask {
     pub schedule: TaskSchedule,
     pub prompt: String,
     pub model: String,
+    pub thinking: String,
     pub created_at: u64,
     pub status: String,   // "pending" | "completed" | "cancelled"
     pub logs: Vec<TaskLog>,
