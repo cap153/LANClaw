@@ -1,0 +1,426 @@
+一个轻量化的独立项目LANClaw(使用rust开发)，主要功能是：创建一个在线机器人，把在线用户发送给机器人的消息转发给pi，然后把pi的回答转发回在线用户，下面是需求：
+
+- 不更改原有LANChat结构
+- 支持读取在线用户发来的文件，支持给在线用户发送文件(我想看截图、文档会很有用)
+- 支持单次/重复定时任务，单次任务执行完自动发送日志给制定任务的用户；重复任务执行完不自动发日志，但是所有用户都可以询问队列中有哪些任务以及日志(例如30分钟后提醒我起床的单次任务，或者每天去某个网站打卡)
+- 可以考虑整理成技能，在运行LANClaw的时候生成相关技能
+- 不同用户根据id匹配不同session以持久化聊天(这样可以不用处理数据库)(可以考虑使用pi -p --session <id>这样的单次聊天实现，或者SDK嵌入代码？)
+- 收到/new消息删除当前会话绑定的session并新建session
+- --model指定模型
+- --name指定机器人名称
+- 默认关闭思考提升响应速度
+
+### 核心理念
+
+```
+LANClaw = 协议兼容层 + 调度引擎 + pi 启动器
+         │                  │            │
+         │  LANChat 兼容     │  定时任务   │  spawn pi -p
+         │  UDP/TCP/HTTP    │  执行器     │  + session 管理
+```
+
+- 不是 LANChat 的依赖/插件，是独立 peer，说一样的网络语言
+- 定时任务不用用户记命令，通过 skill 告诉 pi 怎么调用 lanclaw task 底层工具
+- 用户只需要自然语言 + 记住 /new 重置 session
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 1: 项目初始化
+
+```bash
+cargo new lanclaw
+```
+
+依赖：
+
+```toml
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["multipart"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+mime_guess = "2"
+fs2 = "0.4"              # 文件锁，防多进程冲突
+```
+
+CLI 接口（clap）：
+
+```bash
+# 服务模式（默认）
+lanclaw [--name "PiBot"] [--model sonnet] [--port 8888]
+
+# 工具子命令（供 pi 的 bash 调用）
+lanclaw task add <when> <prompt> [--user-id <uuid>] [--model <m>]
+lanclaw task list
+lanclaw task cancel <id>
+lanclaw task logs <id>
+```
+
+服务模式和 CLI 子命令共享 tasks.json 作为状态文件，用文件锁防冲突。
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 2: 协议兼容层 — 成为 LANChat 网络的一等公民
+
+LANClaw 在端口 8888（默认）上实现完整的 LANChat peer 协议：
+
+UDP 发现（network/discovery.rs）
+- 每 2 秒广播：LANChat|ONLINE|<bot_uuid>|<bot_name>|8888|<mem>
+- 监听同网段广播，维护在线用户列表
+- 复用 LANChat 的组播地址 224.0.0.167 和广播地址遍历逻辑
+
+TCP 消息服务器（network/messaging.rs）
+- 监听 0.0.0.0:8888
+- 接收 LANChat 标准 TextMessage（4 字节长度前缀 + JSON）
+- 支持 HandshakeMessage（兼容 LANChat 的离线补发握手）
+- 收到的消息全部交给 Router
+
+消息发送
+- 优先 WebSocket：ws://<target_ip>:8888/ws
+- 回退 TCP：直接连接 <target_ip>:8888，长度前缀 + JSON
+- 复用 LANChat 同样的 TextMessage 结构体
+
+HTTP 文件服务（network/file.rs）
+- 在同一端口（8888）用 axum 嵌入 HTTP 服务
+- POST /api/upload — 分块文件上传（和 LANChat 完全一致的 multipart 协议）
+- GET /api/download/<file_id> — 文件下载
+- 保存目录：~/.local/share/lanclaw/files/
+
+关键：这些全部是 LANClaw 自己的实现，只是协议和 LANChat 兼容。零依赖 LANChat 本身。
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 3: Pi 桥接层（pi_bridge.rs）
+
+Session 管理
+
+```
+~/.local/share/lanclaw/sessions/
+├── <user_uuid_1>.jsonl
+├── <user_uuid_2>.jsonl
+└── ...
+```
+
+每个用户 ID 对应一个 pi session 文件。
+
+调用 pi：
+
+```rust
+fn query_pi(user_id: &str, message: &str, model: &str, files: &[PathBuf]) -> Result<String> {
+   let session = format!("~/.local/share/lanclaw/sessions/{}.jsonl", user_id);
+   let skill = "~/.local/share/lanclaw/skill.md";
+
+   let mut cmd = Command::new("pi");
+   cmd.args(["-p", "--session", &session, "--model", model, "--skill", &skill]);
+
+   for file in files {
+       cmd.arg("@");
+       cmd.arg(file);
+   }
+
+   cmd.arg(message);  // 或通过 stdin 管道
+
+   let output = cmd.output()?;
+   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+```
+
+关键参数说明：
+- -p：print 模式，输出到 stdout
+- --session <path>：指定 session 文件，自动创建/续用
+- --model <name>：指定模型
+- --skill <path>：加载技能文件
+- @<file>：传递文件（图片给 pi 看图，文档给 pi 读取）
+
+/new 处理：
+- 删除 sessions/<user_id>.jsonl
+- 回复："Session 已重置，开始全新对话"
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 4: 消息路由器（router.rs）
+
+极简路由，几乎所有逻辑委托给 pi：
+
+┌──────────┬────────────────────────────────────────────────────────────────────┐
+│ 消息     │ 处理                                                               │
+├──────────┼────────────────────────────────────────────────────────────────────┤
+│ /new     │ 删除 session → 回复确认（唯一硬编码命令）                          │
+├──────────┼────────────────────────────────────────────────────────────────────┤
+│ 文本消息 │ pi_bridge::query_pi(user_id, text, model, None) → 回复 stdout      │
+├──────────┼────────────────────────────────────────────────────────────────────┤
+│ 图片文件 │ pi_bridge::query_pi(user_id, "分析这张图片", model, Some(&[path])) │
+├──────────┼────────────────────────────────────────────────────────────────────┤
+│ 文档文件 │ pi_bridge::query_pi(user_id, "阅读这个文件", model, Some(&[path])) │
+└──────────┴────────────────────────────────────────────────────────────────────┘
+
+核心思路：用户说什么语言、提什么需求，全部交给 pi 处理。LANClaw 不解析 /task、/help 等任何命令。Pi 通过 skill 知道自己的能力边界。
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 5: 技能生成（skill_gen.rs）
+
+这是最关键的设计——skill 文件告诉 pi 它能做什么、怎么调用底层工具。
+
+启动时生成 ~/.local/share/lanclaw/skill.md：
+
+```markdown
+# LANClaw Bot — LANChat 智能机器人
+
+你正在以一个局域网聊天机器人的身份运行。你的回复将直接发回给用户。
+
+## 通信能力
+- 直接回复文本：你输出的内容会原样返回给用户
+- 发送文件：如果生成了文件，写入 `~/.local/share/lanclaw/files_out/`
+ 并在回复中说明文件名，系统会自动发送
+
+## 定时任务管理
+你可以通过 bash 工具调用 `lanclaw task` 来管理定时任务：
+
+### 创建单次任务
+```bash
+lanclaw task add 30min "提醒我起床" --user-id <current_user_id>
+lanclaw task add 2026-06-15T09:00 "开会提醒" --user-id <current_user_id>
+```
+
+时间格式: 30min / 2h / 2026-06-15T09:00
+- 单次任务到期后自动执行，结果会发给创建者
+
+### 创建重复任务
+
+```bash
+lanclaw task add daily:08:00 "去网站打卡" --user-id <current_user_id>
+lanclaw task add weekly:mon:09:00 "周会准备"
+```
+
+- 重复任务到期自动执行，结果记录日志但不自动发送
+- 所有用户可查询执行日志
+
+### 查询任务
+
+```bash
+lanclaw task list           # 查看所有任务及状态
+lanclaw task logs <task_id> # 查看某任务的执行历史
+```
+
+### 取消任务
+
+```bash
+lanclaw task cancel <task_id>
+```
+
+文件处理
+
+- 用户发送的图片已保存在 ~/.local/share/lanclaw/files/ 目录
+- 用户发送的文档也在同一目录，用 read 工具读取
+- 分析完成后回复用户结果
+
+约束
+
+- 回复简洁，使用中文
+- 用户不需要知道 /task 命令，由你根据对话自然判断是否需要创建任务
+- 当用户表达"提醒我""定时""每天/每周"等意图时，使用 task 功能
+- 当前用户 ID: {{current_user_id}}
+- 当前时间: {{current_time}}
+```
+
+**注意**：skill 文件在每次启动时生成，`{{current_user_id}}` 和 `{{current_time}}` 由 LANClaw 在调用时动态替换（或每次生成时填充）。
+
+---
+
+### Step 6: 定时任务调度器（`scheduler.rs`）
+
+**存储**（`~/.local/share/lanclaw/tasks.json`）：
+```json
+{
+ "tasks": [
+   {
+     "id": "uuid",
+     "creator_id": "user_uuid",
+     "creator_name": "小明",
+     "type": "once",
+     "schedule": "2026-06-14T15:30:00",
+     "prompt": "提醒我起床",
+     "model": "sonnet",
+     "created_at": 1718300000,
+     "status": "pending",
+     "logs": [
+       {
+         "executed_at": 1718300100,
+         "result": "🔔 起床时间到了！...",
+         "duration_secs": 5
+       }
+     ]
+   },
+   {
+     "id": "uuid",
+     "creator_id": "user_uuid",
+     "creator_name": "小明",
+     "type": "daily",
+     "time": "08:00",
+     "prompt": "去xxx打卡签到",
+     "model": "haiku",
+     "created_at": 1718300000,
+     "status": "pending",
+     "logs": [
+       {
+         "executed_at": 1718300800,
+         "result": "✅ 打卡成功",
+         "duration_secs": 12
+       }
+     ]
+   }
+ ]
+}
+```
+
+调度引擎：
+- tokio 定时器每 30 秒扫描
+- 到期任务：
+ - 通过 PiBridge 执行 prompt：pi -p --session <creator_id> "【定时任务】<prompt>"
+ - 单次任务：执行后标记 completed，自动将结果发回给创建者（TCP 消息）
+ - 重复任务：执行后记录日志，计算下次时间，不自动发送
+- 文件锁（fs2）防止多进程冲突
+
+CLI 子命令实现：
+- lanclaw task add <when> <prompt> [--user-id] [--model]
+ - <when> 支持：30min / 2h / daily:08:00 / weekly:mon:09:00 / 2026-06-15T09:00
+ - 写入 tasks.json（加文件锁）
+- lanclaw task list
+ - 读取 tasks.json，格式化成表格文本
+- lanclaw task cancel <id>
+ - 修改状态为 cancelled
+- lanclaw task logs <id>
+ - 读取并格式化日志
+
+所有 CLI 输出设计为对人类友好，因为 pi 会读取并理解输出内容。
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 7: 端到端流程示例
+
+场景 1：普通问答
+
+```
+用户发送: "帮我写一个斐波那契数列的 Rust 函数"
+
+LANClaw 收到 → pi -p --session user_xxx --skill skill.md "帮我写一个斐波那契数列的 Rust 函数"
+→ pi 输出代码
+→ LANClaw 捕获 stdout → TCP 发回给用户
+```
+
+场景 2：创建定时提醒
+
+```
+用户发送: "30分钟后提醒我喝水"
+
+LANClaw 收到 → pi -p --session user_xxx --skill skill.md "30分钟后提醒我喝水"
+→ pi 阅读 skill，理解可以调用 lanclaw task
+→ pi 执行 bash: lanclaw task add 30min "提醒我喝水" --user-id <current_user_id>
+→ LANClaw CLI 写入 tasks.json，输出 "✅ 任务已创建 (ID: xxx)，将在 30 分钟后执行"
+→ pi 回复: "好的，已设置30分钟后提醒你喝水 💧"
+→ LANClaw 捕获 stdout 发回给用户
+
+...30分钟后...
+→ Scheduler 触发 → pi -p --session user_xxx "【定时任务】提醒我喝水"
+→ pi 回复: "💧 该喝水了！起来活动一下~"
+→ LANClaw 发送给用户（单次任务标记完成）
+```
+
+场景 3：每日打卡（重复任务）
+
+```
+用户发送: "每天早上8点帮我打卡签到"
+
+→ pi 理解意图 → lanclaw task add daily:08:00 "打开浏览器访问 https://example.com/signin 并点击签到按钮"
+→ 任务创建成功
+
+...用户查询...
+"打卡任务状态怎么样？"
+→ pi → lanclaw task list + lanclaw task logs <id>
+→ pi 汇总: "每日打卡任务已执行 3 次，全部成功 ✅，下次执行明天 08:00"
+```
+
+场景 4：查看图片
+
+```
+用户发送图片（LANChat 文件传输）
+→ LANClaw 保存到 ~/.local/share/lanclaw/files/
+→ 回复用户路径，同时自动分析
+→ pi -p @/path/to/image "分析这张图片的内容"
+→ pi 输出分析结果 → LANClaw 发回用户
+```
+
+────────────────────────────────────────────────────────────────────────────────
+
+### Step 8: 数据目录结构
+
+```
+~/.local/share/lanclaw/
+├── sessions/          # pi session 文件（每个用户独立）
+│   └── <uuid>.jsonl
+├── files/             # 用户发来的文件
+│   └── ...
+├── files_out/         # 准备发给用户的文件
+│   └── ...
+├── tasks.json         # 定时任务存储
+├── skill.md           # 动态生成的有效技能文件
+└── bot_id.txt         # 机器人自身 UUID（持久化）
+```
+
+配置：~/.config/lanclaw/config.json
+
+```json
+{
+ "name": "PiBot",
+ "model": "sonnet",
+ "port": 8888
+}
+```
+
+────────────────────────────────────────────────────────────────────────────────
+
+### 和 LANChat 同时运行时的端口策略
+
+```
+同一台机器：
+ LANChat  --port 8888    (默认)
+ LANClaw  --port 8889    (显示指定，或在配置中修改)
+
+不同机器：
+ LANClaw --port 8888     (默认，和另一台机器的 LANChat 不冲突)
+ LANChat --port 8888     (在各自机器上独立运行)
+```
+
+两台机器的 LANChat/LANClaw 通过 UDP 广播互相发现，各自独立监听自己的端口。只要端口在各自机器上不冲突即可。
+
+────────────────────────────────────────────────────────────────────────────────
+
+### 技术栈总结
+
+┌───────────────┬─────────────────────────────────┐
+│ 组件          │ 技术                            │
+├───────────────┼─────────────────────────────────┤
+│ 异步运行时    │ tokio                           │
+├───────────────┼─────────────────────────────────┤
+│ CLI           │ clap (derive)                   │
+├───────────────┼─────────────────────────────────┤
+│ HTTP 文件服务 │ axum + tower-http               │
+├───────────────┼─────────────────────────────────┤
+│ WebSocket     │ tokio-tungstenite               │
+├───────────────┼─────────────────────────────────┤
+│ HTTP 客户端   │ reqwest (multipart)             │
+├───────────────┼─────────────────────────────────┤
+│ 序列化        │ serde + serde_json              │
+├───────────────┼─────────────────────────────────┤
+│ 文件锁        │ fs2                             │
+├───────────────┼─────────────────────────────────┤
+│ AI 引擎       │ pi (外部二进制，通过子进程调用) │
+├───────────────┼─────────────────────────────────┤
+│ AI 技能       │ pi skill (markdown)             │
+└───────────────┴─────────────────────────────────┘
