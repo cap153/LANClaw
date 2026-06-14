@@ -170,6 +170,14 @@ fn query_pi(user_id: &str, message: &str, model: &str, files: &[PathBuf]) -> Res
 启动时生成 ~/.local/share/lanclaw/skill.md：
 
 ```markdown
+---
+name: lanclaw
+description: >-
+ LANChat intelligent bot powered by Pi. Answers questions, analyzes images and
+ documents sent by LANChat users, manages scheduled reminders and recurring
+ tasks via `lanclaw task` CLI, and generates/sends files back to users.
+---
+
 # LANClaw Bot — LANChat 智能机器人
 
 你正在以一个局域网聊天机器人的身份运行。你的回复将直接发回给用户。
