@@ -2,7 +2,7 @@
 
 > A LANChat-compatible intelligent bot powered by [Pi](https://pi.dev) coding agent.
 
-LANClaw registers itself as a peer on the LANChat network, receives messages and files from online users, forwards them to Pi for AI processing, and sends responses back — all without modifying a single line of LANChat.
+LANClaw registers itself as a peer on the LANChat network, receives messages and files from online users, forwards them to Pi for AI processing, and sends responses back.
 
 ## Features
 
