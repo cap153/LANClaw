@@ -331,7 +331,7 @@ impl RpcClient {
             }
 
             self.send_and_wait(cmd).await?;
-            let text = self.wait_for_text().await?;
+            let text = self.wait_for_text(None).await?;
 
             if !text.is_empty() {
                 return Ok(text);
@@ -340,8 +340,78 @@ impl RpcClient {
         Ok(String::new())
     }
 
+    /// 流式 prompt：通过 chunk_tx 逐段发送累积文本
+    /// 保持互斥锁直到回复完成
+    pub async fn prompt_stream(
+        self: &Arc<Self>,
+        user_id: &str,
+        message: &str,
+        files: &[PathBuf],
+        chunk_tx: mpsc::Sender<String>,
+    ) -> Result<PiResult, String> {
+        let _lock = self.rpc_mutex.lock().await;
+
+        // 1. 切换 session
+        let session_path = config::sessions_dir().join(format!("{}.jsonl", user_id));
+        let session_str = session_path.to_string_lossy().to_string();
+        let switch_cmd = serde_json::json!({ "type": "switch_session", "sessionPath": session_str });
+        self.send_and_wait(&switch_cmd).await?;
+
+        // 重设 thinking level
+        let think_cmd = serde_json::json!({ "type": "set_thinking_level", "level": "off" });
+        let _ = self.send_and_wait(&think_cmd).await;
+
+        // 2. 注入用户身份
+        let user_tag = format!("[user_id:{}] ", user_id);
+        let tagged_message = format!("{}{}", user_tag, message);
+
+        // 构建 prompt 命令
+        let prompt_cmd = if !files.is_empty() {
+            let images: Vec<Value> = files
+                .iter()
+                .filter(|f| f.exists())
+                .map(|f| {
+                    let data = std::fs::read(f).unwrap_or_default();
+                    let mime = mime_guess::from_path(f).first_or_octet_stream().to_string();
+                    serde_json::json!({
+                        "type": "image", "data": base64_encode(&data), "mimeType": mime,
+                    })
+                })
+                .collect();
+            if images.is_empty() {
+                serde_json::json!({ "type": "prompt", "message": &tagged_message })
+            } else {
+                serde_json::json!({ "type": "prompt", "message": &tagged_message, "images": images })
+            }
+        } else {
+            serde_json::json!({ "type": "prompt", "message": &tagged_message })
+        };
+
+        tracing::info!(
+            "[RPC] >>> user={} msg={}",
+            user_id.chars().take(8).collect::<String>(),
+            serde_json::to_string(&prompt_cmd).unwrap_or_default()
+        );
+
+        // 3. 发送 prompt，流式收集
+        self.send_and_wait(&prompt_cmd).await?;
+        let text = self.wait_for_text(Some(chunk_tx)).await?;
+
+        let generated_files = scan_generated_files();
+        let text = strip_user_id_tag(&text);
+
+        if text.is_empty() {
+            tracing::warn!("[RPC] 回复为空");
+        } else {
+            tracing::info!("[RPC] 回复 ({} chars): {}", text.len(), text.chars().take(80).collect::<String>());
+        }
+
+        Ok(PiResult { text, files: generated_files })
+    }
+
     /// 等待 agent_end，同时收集 text_delta 组成完整回复
-    async fn wait_for_text(&self) -> Result<String, String> {
+    /// 如果传了 chunk_tx，每个 delta 后把累积文本发过去（流式）
+    async fn wait_for_text(&self, chunk_tx: Option<mpsc::Sender<String>>) -> Result<String, String> {
         let mut event_rx = self.event_rx.lock().await;
         let mut text = String::new();
 
@@ -357,6 +427,9 @@ impl RpcClient {
 
             if let Some(delta) = event.into_text_delta() {
                 text.push_str(&delta);
+                if let Some(ref tx) = chunk_tx {
+                    let _ = tx.send(text.clone()).await;
+                }
             }
         }
     }

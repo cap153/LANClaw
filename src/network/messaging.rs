@@ -79,7 +79,66 @@ async fn send_via_tcp(peer_addr: &str, message: &TextMessage) -> Result<(), Stri
     Ok(())
 }
 
-/// 发送文件消息通知给 peer（告知对方有文件可下载）
+/// 流式发送：通过同一个 WebSocket 逐 chunk 发送回复内容
+/// 收到 `chunks` 关闭时自动标记最后一条为 `stream_final: true`
+pub async fn send_stream_chunks(
+    peer_addr: &str,
+    from_id: String,
+    from_name: String,
+    mut chunks: mpsc::Receiver<String>,
+    min_timestamp: u64,
+) -> Result<(), String> {
+    let ws_url = format!("ws://{}/ws", peer_addr);
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("WS 连接失败: {}", e))?;
+
+    let stream_id = uuid::Uuid::new_v4().to_string();
+    let mut pending: Option<String> = None;
+    // 所有 chunk 使用相同时间戳（紧跟在用户消息之后），防止 seq 累加导致时间戳偏大
+    let ts = min_timestamp.saturating_add(1);
+
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    loop {
+        let chunk = chunks.recv().await;
+        match chunk {
+            Some(text) => {
+                // 发送前一段（非 final）
+                if let Some(prev) = pending.take() {
+                    let json = stream_json(&from_id, &from_name, &prev, ts, &stream_id, false);
+                    ws_stream.send(WsMessage::Text(json.into())).await.map_err(|e| e.to_string())?;
+                }
+                pending = Some(text);
+            }
+            None => {
+                // 通道关闭 → 最后一段标记 final
+                if let Some(last) = pending.take() {
+                    let json = stream_json(&from_id, &from_name, &last, ts, &stream_id, true);
+                    ws_stream.send(WsMessage::Text(json.into())).await.map_err(|e| e.to_string())?;
+                }
+                break;
+            }
+        }
+    }
+
+    let _ = ws_stream.close(None).await;
+    Ok(())
+}
+
+fn stream_json(from_id: &str, from_name: &str, content: &str, timestamp: u64, stream_id: &str, is_final: bool) -> String {
+    serde_json::json!({
+        "msg_type": "text",
+        "from_id": from_id,
+        "from_name": from_name,
+        "content": content,
+        "timestamp": timestamp,
+        "stream_id": stream_id,
+        "stream_final": is_final,
+    }).to_string()
+}
+
+/// 发送文件消息通知给 peer（告知对方有文件可下载）"}]
 #[allow(dead_code)]
 pub async fn send_file_notification(
     peer_addr: &str,

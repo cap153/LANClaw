@@ -4,6 +4,7 @@ use crate::rpc_client::RpcClient;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub struct BotConfig {
     pub name: String,
@@ -33,17 +34,17 @@ pub async fn handle_message(
         match config.rpc.reset_session(&from_id).await {
             Ok(_) => {
                 let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
-                send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp)).await;
+                send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
             }
             Err(e) => {
                 let reply = format!("❌ 重置失败: {}", e);
-                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
         return;
     }
 
-    // ─── 文件通知处理 ──────────────────────────────────────────────
+    // ─── 文件通知处理（流式） ──────────────────────────────────────────
     let is_file_notification = content.starts_with("[文件]");
 
     if is_file_notification {
@@ -70,45 +71,81 @@ pub async fn handle_message(
                 format!("阅读这个文件 ({}), 总结其内容。如果代码则分析代码。", file_name)
             };
 
-            let result = config.rpc.prompt(&from_id, &prompt, &[file_path]).await;
+            // 流式分析
+            let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
+            let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
 
-            match result {
-                Ok(pi_result) => {
-                    send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
-                    for f in &pi_result.files {
-                        send_file_to_user(&peers, &from_id, f, config).await;
+            if let Some(handle) = stream_handle {
+                let result = config.rpc.prompt_stream(&from_id, &prompt, &[file_path], chunk_tx).await;
+                match result {
+                    Ok(pi_result) => {
+                        let _ = handle.await;
+                        for f in &pi_result.files {
+                            send_file_to_user(&peers, &from_id, f, config).await;
+                        }
+                    }
+                    Err(e) => {
+                        let reply = format!("❌ 分析失败: {}", e);
+                        send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
                     }
                 }
-                Err(e) => {
-                    let reply = format!("❌ 分析失败: {}", e);
-                    send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
+            } else {
+                // WS 连不上，回退到非流式
+                let result = config.rpc.prompt(&from_id, &prompt, &[file_path]).await;
+                match result {
+                    Ok(pi_result) => {
+                        send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
+                        for f in &pi_result.files {
+                            send_file_to_user(&peers, &from_id, f, config).await;
+                        }
+                    }
+                    Err(e) => {
+                        let reply = format!("❌ 分析失败: {}", e);
+                        send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
+                    }
                 }
             }
         } else {
             let reply = "📁 已收到文件通知，但未找到文件数据。请稍后再试。";
-            send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp)).await;
+            send_to_peer(&peers, &from_id, &config.name, reply, config, None).await;
         }
         return;
     }
 
-    // ─── 普通文本 → 交给 pi ────────────────────────────────────
-    let result = config.rpc.prompt(&from_id, &content, &[]).await;
+    // ─── 普通文本 → 流式回复 ────────────────────────────────────
+    let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
+    let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
 
-    match result {
-        Ok(pi_result) => {
-            // 发送文本回复
-            if !pi_result.text.is_empty() {
-                send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
+    if let Some(handle) = stream_handle {
+        let result = config.rpc.prompt_stream(&from_id, &content, &[], chunk_tx).await;
+        match result {
+            Ok(pi_result) => {
+                let _ = handle.await;
+                for file_path in &pi_result.files {
+                    send_file_to_user(&peers, &from_id, file_path, config).await;
+                }
             }
-
-            // 发送生成的文件
-            for file_path in &pi_result.files {
-                send_file_to_user(&peers, &from_id, file_path, config).await;
+            Err(e) => {
+                let reply = format!("❌ pi 调用失败: {}", e);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
             }
         }
-        Err(e) => {
-            let reply = format!("❌ pi 调用失败: {}", e);
-            send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
+    } else {
+        // WS 连不上，回退到非流式
+        let result = config.rpc.prompt(&from_id, &content, &[]).await;
+        match result {
+            Ok(pi_result) => {
+                if !pi_result.text.is_empty() {
+                    send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
+                }
+                for file_path in &pi_result.files {
+                    send_file_to_user(&peers, &from_id, file_path, config).await;
+                }
+            }
+            Err(e) => {
+                let reply = format!("❌ pi 调用失败: {}", e);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
+            }
         }
     }
 }
@@ -143,6 +180,45 @@ async fn send_to_peer(
         }
         None => {
             tracing::warn!("[Router] 用户 {} 不在线或未知", target_id);
+        }
+    }
+}
+
+/// 通过 peer 地址流式发送文本消息
+/// 返回 JoinHandle，失败时（WS 连不上）返回 None
+async fn send_to_peer_stream(
+    peers: &PeerMap,
+    target_id: &str,
+    bot_name: &str,
+    chunk_rx: mpsc::Receiver<String>,
+    bot_id: String,
+    min_timestamp: u64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let addr = {
+        let map = peers.read().await;
+        map.get(target_id).map(|p| p.addr.clone())
+    };
+
+    match addr {
+        Some(addr) => {
+            let bot_name = bot_name.to_string();
+            Some(tokio::spawn(async move {
+                if let Err(e) = messaging::send_stream_chunks(
+                    &addr,
+                    bot_id,
+                    bot_name,
+                    chunk_rx,
+                    min_timestamp,
+                )
+                .await
+                {
+                    tracing::error!("[Router] 流式发送失败: {}", e);
+                }
+            }))
+        }
+        None => {
+            tracing::warn!("[Router] 用户 {} 不在线或未知", target_id);
+            None
         }
     }
 }
