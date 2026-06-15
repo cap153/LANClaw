@@ -131,6 +131,13 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
         }
         return Err("格式: daily:HH:MM".to_string());
     }
+    if let Some(rest) = when.strip_prefix("every:") {
+        let secs = parse_duration(rest)?;
+        if secs < 1 {
+            return Err("间隔至少 1 秒".to_string());
+        }
+        return Ok(TaskSchedule::Every { interval_secs: secs });
+    }
     if let Some(rest) = when.strip_prefix("weekly:") {
         let parts: Vec<&str> = rest.split(':').collect();
         if parts.len() == 3 {
@@ -168,7 +175,21 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
         }
         return Ok(TaskSchedule::Once { execute_at });
     }
-    Err("无法解析时间，支持的格式: 30s, 30min, 2h, daily:HH:MM, weekly:day:HH:MM, 2026-06-15T09:00".to_string())
+    Err("无法解析时间，支持的格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM, 2026-06-15T09:00".to_string())
+}
+
+/// 解析间隔时长
+fn parse_duration(s: &str) -> Result<u64, String> {
+    if let Some(n) = s.strip_suffix('s') {
+        Ok(n.parse::<f64>().map_err(|_| "无效时间")? as u64)
+    } else if let Some(n) = s.strip_suffix("min") {
+        Ok((n.parse::<f64>().map_err(|_| "无效时间")? * 60.0) as u64)
+    } else if let Some(n) = s.strip_suffix('h') {
+        Ok((n.parse::<f64>().map_err(|_| "无效时间")? * 3600.0) as u64)
+    } else {
+        // 纯数字默认秒
+        s.parse::<u64>().map_err(|_| "格式: every:10s / every:5min / every:2h".to_string())
+    }
 }
 
 /// 列出所有任务
@@ -189,6 +210,15 @@ pub fn list_tasks() -> Result<String, String> {
             }
             TaskSchedule::Daily { time } => format!("每天 {}", time),
             TaskSchedule::Weekly { day, time } => format!("每周{} {}", day, time),
+            TaskSchedule::Every { interval_secs } => {
+                if *interval_secs < 60 {
+                    format!("每 {} 秒", interval_secs)
+                } else if *interval_secs < 3600 {
+                    format!("每 {} 分钟", interval_secs / 60)
+                } else {
+                    format!("每 {} 小时", interval_secs / 3600)
+                }
+            }
         };
 
         let status_icon = match task.status.as_str() {
@@ -374,24 +404,28 @@ async fn tick(
         // 更新任务状态和日志
         match load_tasks() {
             Ok(mut store) => {
+                // 先找到任务（判断类型，获取 creator_id）
+                let (is_once, creator_id) = store.tasks.iter().find(|t| t.id == *task_id)
+                    .map(|t| (matches!(t.schedule, TaskSchedule::Once { .. }), t.creator_id.clone()))
+                    .unwrap_or((false, String::new()));
+
+                // 记日志（所有类型任务）
                 if let Some(t) = store.tasks.iter_mut().find(|t| t.id == *task_id) {
                     t.logs.push(TaskLog {
                         executed_at: now,
                         result: result_text.clone(),
                         duration_secs: duration,
                     });
-
-                    let is_once = matches!(t.schedule, TaskSchedule::Once { .. });
-                    if is_once {
-                        t.status = "completed".to_string();
-                        // 单次任务：發送結果給創建者
-                        let msg = format!("⏰ 定时任务完成\n\n{}", result_text);
-                        send_fn(t.creator_id.clone(), msg);
-                    }
-                    // 重复任务：仅记录日志
-
-                    save_tasks(&store)?;
                 }
+
+                // 单次任务：发送通知后删除；重复任务：仅保存日志
+                if is_once {
+                    let msg = format!("⏰ 定时任务完成\n\n{}", result_text);
+                    send_fn(creator_id, msg);
+                    store.tasks.retain(|t| t.id != *task_id);
+                }
+
+                let _ = save_tasks(&store);
             }
             Err(e) => eprintln!("[Scheduler] 加载任务失败: {}", e),
         }

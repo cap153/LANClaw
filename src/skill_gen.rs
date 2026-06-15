@@ -59,8 +59,12 @@ lanclaw task add 30min --reply "状态如下：" --exec "systemctl status 9route
 
 # 重复任务：每天打卡
 lanclaw task add daily:08:00 --exec "打卡脚本.sh" --user-id <用户ID>
+
+# 每隔 N 秒/分钟/小时执行
+lanclaw task add every:10s --exec "systemctl status 9router" --user-id <用户ID>
+lanclaw task add every:5min --reply "该喝水了" --user-id <用户ID>
 ```
-- 时间格式: `30s` / `30min` / `2h` / `2026-06-15T09:00` / `daily:HH:MM` / `weekly:day:HH:MM`
+- 时间格式: `30s` / `30min` / `2h` / `every:10s` / `daily:HH:MM` / `weekly:day:HH:MM` / `2026-06-15T09:00`
 - 多个 `--reply` / `--exec` / `--file` 按顺序依次执行
 - 单次任务执行结果自动发给创建者；重复任务记录日志，所有人可查
 

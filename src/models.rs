@@ -55,6 +55,8 @@ pub enum TaskSchedule {
     Daily { time: String },          // "08:00"
     #[serde(rename = "weekly")]
     Weekly { day: String, time: String }, // day: "mon","tue",... time: "09:00"
+    #[serde(rename = "every")]
+    Every { interval_secs: u64 },
 }
 
 /// 任务到期时执行的动作
@@ -141,6 +143,13 @@ impl TimerTask {
                     }
                     current = current.succ_opt().unwrap_or(current);
                 }
+            }
+            TaskSchedule::Every { interval_secs } => {
+                if self.status != "pending" {
+                    return None;
+                }
+                let last = self.logs.last().map(|l| l.executed_at).unwrap_or(self.created_at);
+                Some(last + interval_secs)
             }
         }
     }

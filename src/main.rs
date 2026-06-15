@@ -59,7 +59,7 @@ struct TaskArgs {
 enum TaskAction {
     /// 添加定时任务
     Add {
-        /// 时间：30s, 30min, 2h, daily:08:00, weekly:mon:09:00, 2026-06-15T09:00
+        /// 时间：30s, 30min, 2h, every:10s, daily:08:00, weekly:mon:09:00, 2026-06-15T09:00
         when: String,
         /// 创建者用户 ID
         #[arg(long)]
