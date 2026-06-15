@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, Mutex};
 enum RpcEvent {
     Response { success: bool, data: Option<Value>, error: Option<String> },
     AgentEnd,
+    TextDelta { text: String },
     Other { event_type: String },
 }
 
@@ -21,17 +22,25 @@ impl RpcEvent {
         match self {
             RpcEvent::Response { .. } => "response",
             RpcEvent::AgentEnd => "agent_end",
+            RpcEvent::TextDelta { .. } => "text_delta",
             RpcEvent::Other { event_type } => event_type,
         }
     }
 
     fn is_agent_end(&self) -> bool {
-        matches!(self, RpcEvent::AgentEnd { .. })
+        matches!(self, RpcEvent::AgentEnd)
     }
 
     fn try_into_response(self) -> Option<(bool, Option<Value>, Option<String>)> {
         match self {
             RpcEvent::Response { success, data, error } => Some((success, data, error)),
+            _ => None,
+        }
+    }
+
+    fn into_text_delta(self) -> Option<String> {
+        match self {
+            RpcEvent::TextDelta { text } => Some(text),
             _ => None,
         }
     }
@@ -136,14 +145,12 @@ impl RpcClient {
         let mut cmd = Command::new("pi");
         cmd.arg("--mode").arg("rpc");
         cmd.arg("--no-context-files");
-        cmd.arg("--no-extensions");
         cmd.arg("--session-dir").arg(&session_dir);
 
         let mut log_parts = vec![
             "pi".to_string(),
             "--mode rpc".to_string(),
             "--no-context-files".to_string(),
-            "--no-extensions".to_string(),
             format!("--session-dir {}", session_dir.display()),
         ];
 
@@ -176,16 +183,14 @@ impl RpcClient {
     ) -> Result<PiResult, String> {
         let _lock = self.rpc_mutex.lock().await;
 
-        // 1. 切换到用户的 session
+        // 1. 切换到用户的 session（文件不存在时 pi 自动创建）
         let session_path = config::sessions_dir().join(format!("{}.jsonl", user_id));
-        if session_path.exists() {
-            let session_str = session_path.to_string_lossy().to_string();
-            let cmd = serde_json::json!({
-                "type": "switch_session",
-                "sessionPath": session_str,
-            });
-            self.send_and_wait(&cmd).await?;
-        }
+        let session_str = session_path.to_string_lossy().to_string();
+        let switch_cmd = serde_json::json!({
+            "type": "switch_session",
+            "sessionPath": session_str,
+        });
+        self.send_and_wait(&switch_cmd).await?;
 
         // 2. 构建 prompt 命令（带文件）
         let prompt_cmd = if !files.is_empty() {
@@ -218,33 +223,26 @@ impl RpcClient {
             serde_json::json!({ "type": "prompt", "message": message })
         };
 
+        // 3. 发送 prompt 并等 agent_end（空回复时自动重试 2 次）
         tracing::info!(
-            "[RPC] prompt: user={} files={} msg={}",
+            "[RPC] >>> user={} msg={}",
             user_id.chars().take(8).collect::<String>(),
-            files.len(),
-            message.chars().take(60).collect::<String>()
+            serde_json::to_string(&prompt_cmd).unwrap_or_default()
         );
 
-        // 3. 发送 prompt 并等 agent_end
-        self.send_and_wait(&prompt_cmd).await?;
-        self.wait_for(|e| e.is_agent_end()).await?;
-
-        // 4. 获取最终文本
-        let text_cmd = serde_json::json!({ "type": "get_last_assistant_text" });
-        let resp = self.send_and_wait(&text_cmd).await?;
-        let text = resp
-            .get("data")
-            .and_then(|d| d.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
+        let text = self.prompt_with_retry(&prompt_cmd, 2).await?;
 
         let generated_files = scan_generated_files();
 
-        tracing::info!(
-            "[RPC] 回复: {}",
-            text.chars().take(120).collect::<String>()
-        );
+        if text.is_empty() {
+            tracing::warn!("[RPC] 回复为空");
+        } else {
+            tracing::info!(
+                "[RPC] 回复 ({} chars): {}",
+                text.len(),
+                text.chars().take(80).collect::<String>()
+            );
+        }
 
         Ok(PiResult {
             text,
@@ -256,18 +254,19 @@ impl RpcClient {
     pub async fn reset_session(&self, user_id: &str) -> Result<(), String> {
         let _lock = self.rpc_mutex.lock().await;
 
+        // 删除 session 文件，然后让 pi 切换到一个全新的空 session
         let session_path = config::sessions_dir().join(format!("{}.jsonl", user_id));
         if session_path.exists() {
-            let session_str = session_path.to_string_lossy().to_string();
-            let switch_cmd = serde_json::json!({
-                "type": "switch_session",
-                "sessionPath": session_str,
-            });
-            self.send_and_wait(&switch_cmd).await?;
+            std::fs::remove_file(&session_path)
+                .map_err(|e| format!("删除 session 文件失败: {}", e))?;
         }
 
-        let new_session_cmd = serde_json::json!({ "type": "new_session" });
-        self.send_and_wait(&new_session_cmd).await?;
+        let session_str = session_path.to_string_lossy().to_string();
+        let switch_cmd = serde_json::json!({
+            "type": "switch_session",
+            "sessionPath": session_str,
+        });
+        self.send_and_wait(&switch_cmd).await?;
 
         tracing::info!("[RPC] Session 已重置: {}", user_id);
         Ok(())
@@ -302,28 +301,41 @@ impl RpcClient {
         }
     }
 
-    /// 等待满足条件的事件（忽略其他事件）
-    async fn wait_for<F>(&self, mut pred: F) -> Result<(), String>
-    where
-        F: FnMut(&RpcEvent) -> bool,
-    {
+    /// 发送 prompt 并等待回复，空回复时自动重试
+    async fn prompt_with_retry(&self, cmd: &Value, max_retries: u32) -> Result<String, String> {
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                tracing::warn!("[RPC] 空回复，第 {} 次重试...", attempt);
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+
+            self.send_and_wait(cmd).await?;
+            let text = self.wait_for_text().await?;
+
+            if !text.is_empty() {
+                return Ok(text);
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// 等待 agent_end，同时收集 text_delta 组成完整回复
+    async fn wait_for_text(&self) -> Result<String, String> {
         let mut event_rx = self.event_rx.lock().await;
+        let mut text = String::new();
+
         loop {
             let event = event_rx
                 .recv()
                 .await
                 .ok_or_else(|| "RPC 事件通道关闭".to_string())?;
 
-            let event_type = event.event_type().to_string();
-
-            if pred(&event) {
-                return Ok(());
+            if event.is_agent_end() {
+                return Ok(text);
             }
 
-            tracing::trace!("[RPC] wait_for 跳过: {}", event_type);
-
-            if event_type == "extension_error" {
-                tracing::warn!("[RPC] extension_error 事件");
+            if let Some(delta) = event.into_text_delta() {
+                text.push_str(&delta);
             }
         }
     }
@@ -379,6 +391,24 @@ impl RpcClient {
                 error: val.get("error").and_then(|e| e.as_str()).map(String::from),
             },
             "agent_end" => RpcEvent::AgentEnd,
+            "message_update" => {
+                let is_text = val
+                    .get("assistantMessageEvent")
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("text_delta");
+                if is_text {
+                    let delta = val
+                        .get("assistantMessageEvent")
+                        .and_then(|e| e.get("delta"))
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    RpcEvent::TextDelta { text: delta }
+                } else {
+                    RpcEvent::Other { event_type: event_type.to_string() }
+                }
+            }
             _ => RpcEvent::Other {
                 event_type: event_type.to_string(),
             },

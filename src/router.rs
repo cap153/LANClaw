@@ -25,14 +25,8 @@ pub async fn handle_message(
 
     let content = msg.content.trim().to_string();
     let from_id = msg.from_id.clone();
-    let from_name = msg.from_name.clone();
 
-    tracing::info!(
-        "[Router] 来自 {} ({}): {}",
-        from_name,
-        from_id.chars().take(8).collect::<String>(),
-        content.chars().take(60).collect::<String>()
-    );
+    // 路由信息由 [RPC] prompt 日志覆盖
 
     // ─── /new 命令 ──────────────────────────────────────────────────
     if content == "/new" {

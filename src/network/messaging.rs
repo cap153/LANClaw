@@ -104,11 +104,7 @@ pub async fn handle_ws_connection(
             Ok(Message::Text(text)) => {
                 // 尝试解析为 TextMessage
                 if let Ok(tm) = serde_json::from_str::<TextMessage>(&text) {
-                    tracing::info!(
-                        "[WS] 消息: {} 说: {}",
-                        tm.from_name,
-                        tm.content.chars().take(60).collect::<String>()
-                    );
+                    // 消息内容由 [RPC] prompt 日志覆盖
                     let _ = tx.send((tm, peer_addr));
                 } else if let Ok(_hm) =
                     serde_json::from_str::<HandshakeMessage>(&text)
