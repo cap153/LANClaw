@@ -12,21 +12,27 @@ pub fn message_channel() -> (MessageSender, MessageReceiver) {
 }
 
 /// 向一个 peer 发送文本消息（首选 WebSocket，回退 TCP）
+/// `min_timestamp` 可选：回复消息时传入原始消息的 timestamp，
+/// 确保回复的时间戳 ≥ 原始消息时间戳，避免因时钟偏差导致排序错乱
 pub async fn send_text_message(
     peer_addr: &str,
     from_id: String,
     from_name: String,
     content: String,
+    min_timestamp: Option<u64>,
 ) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let timestamp = min_timestamp.map_or(now, |mt| mt.max(now));
+
     let message = TextMessage {
         msg_type: "text".to_string(),
         from_id,
         from_name,
         content,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        timestamp,
     };
 
     let json = serde_json::to_string(&message).map_err(|e| format!("序列化失败: {}", e))?;
@@ -84,7 +90,7 @@ pub async fn send_file_notification(
 ) -> Result<(), String> {
     // 文件消息使用 LANChat 格式：构造一个 file 类型的文本消息
     let content = format!("[文件] {} ({} 字节)", file_name, file_size);
-    send_text_message(peer_addr, from_id, from_name, content).await
+    send_text_message(peer_addr, from_id, from_name, content, None).await
 }
 
 // ─── axum WebSocket Handler ────────────────────────────────────────────────

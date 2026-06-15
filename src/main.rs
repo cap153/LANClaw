@@ -269,6 +269,7 @@ async fn main() {
                         config.bot_id.clone(),
                         config.name.clone(),
                         message,
+                        None,
                     ).await {
                         tracing::error!("[Scheduler] 发送失败: {}", e);
                     }

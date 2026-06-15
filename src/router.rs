@@ -33,11 +33,11 @@ pub async fn handle_message(
         match config.rpc.reset_session(&from_id).await {
             Ok(_) => {
                 let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
-                send_to_peer(&peers, &from_id, &config.name, reply, config).await;
+                send_to_peer(&peers, &from_id, &config.name, reply, config, None).await;
             }
             Err(e) => {
                 let reply = format!("❌ 重置失败: {}", e);
-                send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
             }
         }
         return;
@@ -74,19 +74,19 @@ pub async fn handle_message(
 
             match result {
                 Ok(pi_result) => {
-                    send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config).await;
+                    send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
                     for f in &pi_result.files {
                         send_file_to_user(&peers, &from_id, f, config).await;
                     }
                 }
                 Err(e) => {
                     let reply = format!("❌ 分析失败: {}", e);
-                    send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
+                    send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
                 }
             }
         } else {
             let reply = "📁 已收到文件通知，但未找到文件数据。请稍后再试。";
-            send_to_peer(&peers, &from_id, &config.name, reply, config).await;
+            send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp)).await;
         }
         return;
     }
@@ -98,7 +98,7 @@ pub async fn handle_message(
         Ok(pi_result) => {
             // 发送文本回复
             if !pi_result.text.is_empty() {
-                send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config).await;
+                send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
             }
 
             // 发送生成的文件
@@ -108,7 +108,7 @@ pub async fn handle_message(
         }
         Err(e) => {
             let reply = format!("❌ pi 调用失败: {}", e);
-            send_to_peer(&peers, &from_id, &config.name, &reply, config).await;
+            send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
         }
     }
 }
@@ -120,6 +120,7 @@ async fn send_to_peer(
     bot_name: &str,
     content: &str,
     config: &BotConfig,
+    min_timestamp: Option<u64>,
 ) {
     let addr = {
         let map = peers.read().await;
@@ -133,6 +134,7 @@ async fn send_to_peer(
                 config.bot_id.clone(),
                 bot_name.to_string(),
                 content.to_string(),
+                min_timestamp,
             )
             .await
             {
