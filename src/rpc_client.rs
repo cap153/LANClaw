@@ -62,6 +62,7 @@ impl RpcClient {
 
         let stdin = child.stdin.take().expect("stdin 必须存在");
         let stdout = child.stdout.take().expect("stdout 必须存在");
+        let stderr = child.stderr.take().expect("stderr 必须存在");
 
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(16);
         let (event_tx, event_rx) = mpsc::channel::<RpcEvent>(256);
@@ -83,6 +84,28 @@ impl RpcClient {
         let reader = BufReader::new(stdout);
         tokio::spawn(async move {
             Self::read_loop(reader, event_tx).await;
+        });
+
+        // stderr 读取任务（日志输出，防止管道阻塞）
+        tokio::spawn(async move {
+            let mut stderr_reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stderr_reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            tracing::warn!("[RPC stderr] {}", trimmed);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("[RPC] stderr 读取错误: {}", e);
+                        break;
+                    }
+                }
+            }
         });
 
         let client = Arc::new(Self {
@@ -110,12 +133,14 @@ impl RpcClient {
         let mut cmd = Command::new("pi");
         cmd.arg("--mode").arg("rpc");
         cmd.arg("--no-context-files");
+        cmd.arg("--no-extensions");
         cmd.arg("--session-dir").arg(&session_dir);
 
         let mut log_parts = vec![
             "pi".to_string(),
             "--mode rpc".to_string(),
             "--no-context-files".to_string(),
+            "--no-extensions".to_string(),
             format!("--session-dir {}", session_dir.display()),
         ];
 
