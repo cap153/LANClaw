@@ -33,11 +33,11 @@ pub async fn handle_message(
         match config.rpc.reset_session(&from_id).await {
             Ok(_) => {
                 let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
-                send_to_peer(&peers, &from_id, &config.name, reply, config, None).await;
+                send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp)).await;
             }
             Err(e) => {
                 let reply = format!("❌ 重置失败: {}", e);
-                send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp)).await;
             }
         }
         return;

@@ -155,10 +155,8 @@ impl RpcClient {
         ];
 
         // 注入身份认知到 system prompt
-        let identity = "你是一个 LANChat 局域网聊天机器人，你的回复会原样返回给用户。\
-            每条消息开头有 [user_id:...] 标记，创建任务时 --user-id 必须使用此值。\
-            定时、提醒、重复、打卡等需求使用 `lanclaw task add` 命令，\
-            --reply=回复文本 --exec=执行命令 --file=发送文件 可组合。不要用系统通知。";
+        let identity = "你是一个 LANChat 聊天机器人。每条消息前有 [user_id:...]（仅供参考，回复中不要包含）。\
+            定时/提醒需求用 `lanclaw task add` 命令。";
         cmd.arg("--append-system-prompt").arg(identity);
         log_parts.push(format!("--append-system-prompt ({} bytes)", identity.len()));
 
@@ -263,6 +261,9 @@ impl RpcClient {
                 text.chars().take(80).collect::<String>()
             );
         }
+
+        // 去掉回复中可能泄露的 [user_id:...] 标记
+        let text = strip_user_id_tag(&text);
 
         Ok(PiResult {
             text,
@@ -496,4 +497,15 @@ pub fn clean_files_out() -> std::io::Result<()> {
         std::fs::remove_dir_all(&out_dir)?;
     }
     std::fs::create_dir_all(&out_dir)
+}
+
+/// 去掉回复开头可能泄露的 [user_id:...] 标记
+fn strip_user_id_tag(text: &str) -> String {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("[user_id:") {
+        if let Some(end) = rest.find(']') {
+            return rest[end + 1..].trim().to_string();
+        }
+    }
+    text.to_string()
 }
