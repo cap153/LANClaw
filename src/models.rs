@@ -57,17 +57,30 @@ pub enum TaskSchedule {
     Weekly { day: String, time: String }, // day: "mon","tue",... time: "09:00"
 }
 
+/// 任务到期时执行的动作
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TaskAction {
+    /// 发送预定义的文本给用户
+    #[serde(rename = "reply")]
+    Reply { message: String },
+    /// 执行 bash 命令，将输出发给用户
+    #[serde(rename = "exec")]
+    Exec { command: String },
+    /// 发送文件给用户
+    #[serde(rename = "file")]
+    SendFile { path: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerTask {
     pub id: String,
     pub creator_id: String,
     pub creator_name: String,
     pub schedule: TaskSchedule,
-    pub prompt: String,
-    pub model: String,
-    pub thinking: String,
+    pub actions: Vec<TaskAction>,
     pub created_at: u64,
-    pub status: String,   // "pending" | "completed" | "cancelled"
+    pub status: String,
     pub logs: Vec<TaskLog>,
 }
 

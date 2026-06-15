@@ -59,22 +59,23 @@ struct TaskArgs {
 enum TaskAction {
     /// 添加定时任务
     Add {
-        /// 时间：30min, 2h, daily:08:00, weekly:mon:09:00, 2026-06-15T09:00
+        /// 时间：30s, 30min, 2h, daily:08:00, weekly:mon:09:00, 2026-06-15T09:00
         when: String,
-        /// 任务提示词
-        prompt: String,
         /// 创建者用户 ID
         #[arg(long)]
         user_id: String,
         /// 创建者显示名
         #[arg(long, default_value = "用户")]
         user_name: String,
-        /// 使用的模型（不指定则使用 pi 默认模型）
+        /// 到期回复文本（可多次指定）
         #[arg(long)]
-        model: Option<String>,
-        /// 思考级别
-        #[arg(long, default_value = "off")]
-        thinking: String,
+        reply: Vec<String>,
+        /// 到期执行命令（可多次指定）
+        #[arg(long)]
+        exec: Vec<String>,
+        /// 到期发送文件（可多次指定）
+        #[arg(long)]
+        file: Vec<String>,
     },
     /// 列出所有任务
     List,
@@ -109,18 +110,32 @@ async fn main() {
             TaskCommand::Task(task) => match task.action {
                 TaskAction::Add {
                     when,
-                    prompt,
+                    reply,
+                    exec,
+                    file,
                     user_id,
                     user_name,
-                    model,
-                    thinking,
-                } => match scheduler::add_task(
-                    &when, &prompt, &user_id, &user_name,
-                    &model.as_deref().unwrap_or_default(),
-                    &thinking,
-                ) {
-                    Ok(id) => println!("✅ 任务已创建 (ID: {})", id),
-                    Err(e) => eprintln!("❌ {}", e),
+                } => {
+                    let mut actions = Vec::new();
+                    for msg in &reply {
+                        actions.push(models::TaskAction::Reply { message: msg.clone() });
+                    }
+                    for cmd in &exec {
+                        actions.push(models::TaskAction::Exec { command: cmd.clone() });
+                    }
+                    for path in &file {
+                        actions.push(models::TaskAction::SendFile { path: path.clone() });
+                    }
+                    if actions.is_empty() {
+                        eprintln!("❌ 请指定至少一个 --reply / --exec / --file");
+                    } else {
+                        match scheduler::add_task(
+                            &when, &actions, &user_id, &user_name,
+                        ) {
+                            Ok(id) => println!("✅ 任务已创建 (ID: {})", id),
+                            Err(e) => eprintln!("❌ {}", e),
+                        }
+                    }
                 },
                 TaskAction::List => match scheduler::list_tasks() {
                     Ok(output) => println!("{}", output),
@@ -246,21 +261,30 @@ async fn main() {
                 let map = peers.read().await;
                 map.get(&user_id).map(|p| p.addr.clone())
             };
-            if let Some(addr) = addr {
-                let _ = messaging::send_text_message(
-                    &addr,
-                    config.bot_id.clone(),
-                    config.name.clone(),
-                    message,
-                )
-                .await;
+            match addr {
+                Some(addr) => {
+                    tracing::info!("[Scheduler] 发送消息到 {}: {}", &user_id[..8], message.chars().take(40).collect::<String>());
+                    if let Err(e) = messaging::send_text_message(
+                        &addr,
+                        config.bot_id.clone(),
+                        config.name.clone(),
+                        message,
+                    ).await {
+                        tracing::error!("[Scheduler] 发送失败: {}", e);
+                    }
+                }
+                None => {
+                    tracing::warn!("[Scheduler] 用户 {} 不在 peers 中，无法发送", &user_id[..8]);
+                }
             }
         });
     });
 
-    let scheduler_rpc = rpc_client.clone();
+    let scheduler_peers2 = peers.clone();
+    let scheduler_bot_id = bot_id.clone();
+    let scheduler_bot_name = bot_name.clone();
     tokio::spawn(async move {
-        scheduler::start_scheduler(send_fn, scheduler_rpc).await;
+        scheduler::start_scheduler(send_fn, scheduler_peers2, scheduler_bot_id, scheduler_bot_name).await;
     });
 
     // ─── 主消息循环 ──────────────────────────────────────────────

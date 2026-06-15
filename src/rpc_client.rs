@@ -154,6 +154,14 @@ impl RpcClient {
             format!("--session-dir {}", session_dir.display()),
         ];
 
+        // 注入身份认知到 system prompt
+        let identity = "你是一个 LANChat 局域网聊天机器人，你的回复会原样返回给用户。\
+            每条消息开头有 [user_id:...] 标记，创建任务时 --user-id 必须使用此值。\
+            定时、提醒、重复、打卡等需求使用 `lanclaw task add` 命令，\
+            --reply=回复文本 --exec=执行命令 --file=发送文件 可组合。不要用系统通知。";
+        cmd.arg("--append-system-prompt").arg(identity);
+        log_parts.push(format!("--append-system-prompt ({} bytes)", identity.len()));
+
         if skill_path.exists() {
             cmd.arg("--skill").arg(&skill_path);
             log_parts.push(format!("--skill {}", skill_path.display()));
@@ -164,7 +172,8 @@ impl RpcClient {
             log_parts.push(format!("--model {}", model));
         }
 
-        if !thinking.is_empty() && thinking != "off" {
+        // 始终传递 thinking 级别（即使 off 也要显式传，否则 pi 用默认 high）
+        if !thinking.is_empty() {
             cmd.arg("--thinking").arg(thinking);
             log_parts.push(format!("--thinking {}", thinking));
         }
@@ -192,6 +201,17 @@ impl RpcClient {
         });
         self.send_and_wait(&switch_cmd).await?;
 
+        // 切换后重设 thinking level（旧 session 可能存了 high）
+        let think_cmd = serde_json::json!({
+            "type": "set_thinking_level",
+            "level": "off",
+        });
+        let _ = self.send_and_wait(&think_cmd).await;
+
+        // 2. 在消息前注入用户身份（让 pi 知道 --user-id 该填什么）
+        let user_tag = format!("[user_id:{}] ", user_id);
+        let tagged_message = format!("{}{}", user_tag, message);
+
         // 2. 构建 prompt 命令（带文件）
         let prompt_cmd = if !files.is_empty() {
             let images: Vec<Value> = files
@@ -211,16 +231,16 @@ impl RpcClient {
                 .collect();
 
             if images.is_empty() {
-                serde_json::json!({ "type": "prompt", "message": message })
+                serde_json::json!({ "type": "prompt", "message": &tagged_message })
             } else {
                 serde_json::json!({
                     "type": "prompt",
-                    "message": message,
+                    "message": &tagged_message,
                     "images": images,
                 })
             }
         } else {
-            serde_json::json!({ "type": "prompt", "message": message })
+            serde_json::json!({ "type": "prompt", "message": &tagged_message })
         };
 
         // 3. 发送 prompt 并等 agent_end（空回复时自动重试 2 次）
