@@ -194,8 +194,6 @@ async fn main() {
 
     let bot_config = Arc::new(router::BotConfig {
         name: bot_name.clone(),
-        model: bot_model.clone(),
-        thinking: bot_thinking.clone(),
         bot_id: bot_id.clone(),
         rpc: rpc_client.clone(),
     });

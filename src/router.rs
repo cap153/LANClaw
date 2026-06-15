@@ -5,11 +5,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 pub struct BotConfig {
     pub name: String,
-    pub model: String,
-    pub thinking: String,
     pub bot_id: String,
     pub rpc: Arc<RpcClient>,
 }
