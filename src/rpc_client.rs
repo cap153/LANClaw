@@ -43,6 +43,8 @@ pub struct RpcClient {
     stdin_tx: mpsc::Sender<String>,
     event_rx: Mutex<mpsc::Receiver<RpcEvent>>,
     rpc_mutex: Mutex<()>,
+    #[allow(dead_code)]
+    child: tokio::process::Child,
 }
 
 impl RpcClient {
@@ -112,6 +114,7 @@ impl RpcClient {
             stdin_tx,
             event_rx: Mutex::new(event_rx),
             rpc_mutex: Mutex::new(()),
+            child,
         });
 
         // 等待 RPC 启动就绪
@@ -286,6 +289,8 @@ impl RpcClient {
                 .await
                 .ok_or_else(|| "RPC 事件通道关闭".to_string())?;
 
+            let event_type = event.event_type().to_string();
+
             if let Some((success, data, error)) = event.try_into_response() {
                 if success {
                     return Ok(data.unwrap_or(serde_json::json!(null)));
@@ -293,6 +298,7 @@ impl RpcClient {
                     return Err(error.unwrap_or_else(|| "RPC 命令失败".to_string()));
                 }
             }
+            tracing::trace!("[RPC] send_and_wait 跳过: {}", event_type);
         }
     }
 
@@ -308,11 +314,15 @@ impl RpcClient {
                 .await
                 .ok_or_else(|| "RPC 事件通道关闭".to_string())?;
 
+            let event_type = event.event_type().to_string();
+
             if pred(&event) {
                 return Ok(());
             }
 
-            if event.event_type() == "extension_error" {
+            tracing::trace!("[RPC] wait_for 跳过: {}", event_type);
+
+            if event_type == "extension_error" {
                 tracing::warn!("[RPC] extension_error 事件");
             }
         }
