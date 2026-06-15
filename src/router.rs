@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Bot 配置
+#[allow(dead_code)]
 pub struct BotConfig {
     pub name: String,
     pub model: String,

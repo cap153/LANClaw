@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::config;
 use crate::models::PiResult;
 use serde_json::Value;
