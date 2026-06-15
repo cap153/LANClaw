@@ -292,16 +292,19 @@ pub fn task_logs(task_id: &str) -> Result<String, String> {
 /// 启动调度器后台循环
 ///
 /// `send_fn`: 发送消息给用户的回调（user_id, message）
-pub async fn start_scheduler(send_fn: Arc<dyn Fn(String, String) + Send + Sync + 'static>) {
+pub async fn start_scheduler(
+    send_fn: Arc<dyn Fn(String, String) + Send + Sync + 'static>,
+    rpc: Arc<crate::rpc_client::RpcClient>,
+) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
 
     loop {
         interval.tick().await;
-        let _ = tick(&send_fn).await;
+        let _ = tick(&send_fn, &rpc).await;
     }
 }
 
-async fn tick(send_fn: &Arc<dyn Fn(String, String) + Send + Sync + 'static>) {
+async fn tick(send_fn: &Arc<dyn Fn(String, String) + Send + Sync + 'static>, rpc: &Arc<crate::rpc_client::RpcClient>) {
     let now = Local::now().timestamp() as u64;
 
     // 先收集所有需要执行的任务 ID
@@ -345,11 +348,10 @@ async fn tick(send_fn: &Arc<dyn Fn(String, String) + Send + Sync + 'static>) {
 
         let start = std::time::Instant::now();
 
-        let result = crate::pi_bridge::query_pi(
+        let prompt_msg = format!("【定时任务】{}", task_info.prompt);
+        let result = rpc.prompt(
             &task_info.creator_id,
-            &format!("【定时任务】{}", task_info.prompt),
-            &task_info.model,
-            &task_info.thinking,
+            &prompt_msg,
             &[],
         )
         .await;

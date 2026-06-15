@@ -1,7 +1,7 @@
 mod config;
 mod models;
 mod network;
-mod pi_bridge;
+mod rpc_client;
 mod router;
 mod scheduler;
 mod skill_gen;
@@ -169,7 +169,7 @@ async fn main() {
     println!("[Skill] 技能文件已生成");
 
     // 清理输出文件目录
-    let _ = pi_bridge::clean_files_out();
+    let _ = rpc_client::clean_files_out();
 
     // 初始化 peer 列表
     let peers: models::PeerMap = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -177,11 +177,27 @@ async fn main() {
     // 创建消息通道：network → router
     let (msg_tx, mut msg_rx) = messaging::message_channel();
 
+    // ─── 启动 RPC 客户端（pi --mode rpc 常驻子进程） ──────────
+    let rpc_client = match rpc_client::RpcClient::spawn(
+        &bot_model,
+        &bot_thinking,
+    ).await {
+        Ok(c) => {
+            println!("[RPC] pi RPC 子进程已启动");
+            c
+        }
+        Err(e) => {
+            eprintln!("❌ [RPC] 启动失败: {}", e);
+            return;
+        }
+    };
+
     let bot_config = Arc::new(router::BotConfig {
         name: bot_name.clone(),
         model: bot_model.clone(),
         thinking: bot_thinking.clone(),
         bot_id: bot_id.clone(),
+        rpc: rpc_client.clone(),
     });
 
     // ─── 启动 UDP 发现 ──────────────────────────────────────────
@@ -244,8 +260,9 @@ async fn main() {
         });
     });
 
+    let scheduler_rpc = rpc_client.clone();
     tokio::spawn(async move {
-        scheduler::start_scheduler(send_fn).await;
+        scheduler::start_scheduler(send_fn, scheduler_rpc).await;
     });
 
     // ─── 主消息循环 ──────────────────────────────────────────────

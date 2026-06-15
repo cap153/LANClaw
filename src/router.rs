@@ -1,8 +1,9 @@
 use crate::models::{PeerMap, TextMessage};
 use crate::network::messaging;
-use crate::pi_bridge;
+use crate::rpc_client::RpcClient;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Bot 配置
 pub struct BotConfig {
@@ -10,6 +11,7 @@ pub struct BotConfig {
     pub model: String,
     pub thinking: String,
     pub bot_id: String,
+    pub rpc: Arc<RpcClient>,
 }
 
 /// 消息路由器
@@ -37,7 +39,7 @@ pub async fn handle_message(
 
     // ─── /new 命令 ──────────────────────────────────────────────────
     if content == "/new" {
-        match pi_bridge::reset_session(&from_id) {
+        match config.rpc.reset_session(&from_id).await {
             Ok(_) => {
                 let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
                 send_to_peer(&peers, &from_id, &config.name, reply, config).await;
@@ -77,7 +79,7 @@ pub async fn handle_message(
                 format!("阅读这个文件 ({}), 总结其内容。如果代码则分析代码。", file_name)
             };
 
-            let result = pi_bridge::query_pi(&from_id, &prompt, &config.model, &config.thinking, &[file_path]).await;
+            let result = config.rpc.prompt(&from_id, &prompt, &[file_path]).await;
 
             match result {
                 Ok(pi_result) => {
@@ -99,7 +101,7 @@ pub async fn handle_message(
     }
 
     // ─── 普通文本 → 交给 pi ────────────────────────────────────
-    let result = pi_bridge::query_pi(&from_id, &content, &config.model, &config.thinking, &[]).await;
+    let result = config.rpc.prompt(&from_id, &content, &[]).await;
 
     match result {
         Ok(pi_result) => {
