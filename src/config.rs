@@ -69,6 +69,12 @@ impl Config {
             let _ = std::fs::write(&path, content);
         }
     }
+
+    /// 更新 model 字段并持久化
+    pub fn update_model(&mut self, model: &str) {
+        self.model = model.to_string();
+        self.save();
+    }
 }
 
 /// Get bot's persistent UUID (stored in data dir)

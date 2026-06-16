@@ -15,6 +15,7 @@ use clap::Parser;
 use network::file::AppState;
 use network::messaging;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// LANClaw — LANChat 智能机器人（Pi 驱动）
@@ -211,6 +212,7 @@ async fn main() {
         name: bot_name.clone(),
         bot_id: bot_id.clone(),
         rpc: rpc_client.clone(),
+        switching_model: AtomicBool::new(false),
     });
 
     // ─── 启动 UDP 发现 ──────────────────────────────────────────

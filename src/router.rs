@@ -3,6 +3,7 @@ use crate::network::messaging;
 use crate::rpc_client::RpcClient;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -10,6 +11,8 @@ pub struct BotConfig {
     pub name: String,
     pub bot_id: String,
     pub rpc: Arc<RpcClient>,
+    /// 模型切换中标志（防止重复点击）
+    pub switching_model: AtomicBool,
 }
 
 /// 消息路由器
@@ -41,6 +44,83 @@ pub async fn handle_message(
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
+        return;
+    }
+
+    // ─── /model 命令 ───────────────────────────────────────────────
+    if content == "/model" {
+        // 获取当前模型信息
+        let current_model = config.rpc.get_current_model().await.ok().flatten();
+        let current_line = match &current_model {
+            Some(m) => {
+                let name = if !m.name.is_empty() { &m.name } else { &m.id };
+                format!("🟢 当前模型: {} ({})", name, m.provider)
+            }
+            None => "🟢 当前模型: pi 默认".to_string(),
+        };
+
+        match config.rpc.get_available_models().await {
+            Ok(models) => {
+                if models.is_empty() {
+                    let reply = format!("{}\n\n⚠️ pi 配置中没有找到可用模型。请先在 pi 中配置至少一个模型。", current_line);
+                    send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+                    return;
+                }
+                // 构建 [MODEL_LIST] 消息，第一行显示当前模型，第二行是 JSON 列表
+                let list_json = serde_json::to_string(&models).unwrap_or_default();
+                let reply = format!("[MODEL_LIST]\n{}\n{}", current_line, list_json);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+            }
+            Err(e) => {
+                let reply = format!("{}\n\n❌ 查询模型列表失败: {}", current_line, e);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+            }
+        }
+        return;
+    }
+
+    // ─── /model select <provider> <modelId> ────────────────────────
+    if content.starts_with("/model select ") {
+        // 检查是否正在切换
+        if config.switching_model.load(Ordering::Acquire) {
+            let reply = "⏳ 正在切换模型中，请稍候...";
+            send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
+            return;
+        }
+
+        let selector = content.trim_start_matches("/model select ").trim().to_string();
+        let parts: Vec<&str> = selector.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            let reply = "⚠️ 用法: /model select <provider> <modelId>";
+            send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+            return;
+        }
+        let provider = parts[0].trim();
+        let model_id = parts[1].trim();
+
+        config.switching_model.store(true, Ordering::Release);
+
+        let result = config.rpc.set_model(provider, model_id).await;
+        match result {
+            Ok(model_info) => {
+                let model_name = if !model_info.name.is_empty() {
+                    model_info.name.clone()
+                } else {
+                    model_info.id.clone()
+                };
+                // 更新本地配置
+                let mut cfg = crate::config::Config::load();
+                cfg.update_model(&model_id);
+                // 同时更新 BotConfig 中的 rpc 模型（下次起 spawn 会使用新模型，但当前 rpc 已切换）
+                let reply = format!("✅ 已切换到模型: {} ({} / {})", model_name, model_info.provider, model_info.id);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+            }
+            Err(e) => {
+                let reply = format!("❌ 模型切换失败: {}", e);
+                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+            }
+        }
+        config.switching_model.store(false, Ordering::Release);
         return;
     }
 

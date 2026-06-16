@@ -271,6 +271,46 @@ impl RpcClient {
         })
     }
 
+    /// 获取 pi 配置中所有可用模型
+    pub async fn get_available_models(&self) -> Result<Vec<crate::models::ModelInfo>, String> {
+        let cmd = serde_json::json!({ "type": "get_available_models" });
+        let data = self.send_and_wait(&cmd).await?;
+        let models: Vec<crate::models::ModelInfo> =
+            serde_json::from_value(data.get("models").cloned().unwrap_or(serde_json::json!([])))
+                .map_err(|e| format!("解析模型列表失败: {}", e))?;
+        Ok(models)
+    }
+
+    /// 获取当前模型信息
+    pub async fn get_current_model(&self) -> Result<Option<crate::models::ModelInfo>, String> {
+        let cmd = serde_json::json!({ "type": "get_state" });
+        let data = self.send_and_wait(&cmd).await?;
+        match data.get("model") {
+            Some(model_val) if !model_val.is_null() => {
+                let model: crate::models::ModelInfo =
+                    serde_json::from_value(model_val.clone())
+                        .map_err(|e| format!("解析当前模型失败: {}", e))?;
+                Ok(Some(model))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// 切换到指定模型
+    pub async fn set_model(&self, provider: &str, model_id: &str) -> Result<crate::models::ModelInfo, String> {
+        let _lock = self.rpc_mutex.lock().await;
+        let cmd = serde_json::json!({
+            "type": "set_model",
+            "provider": provider,
+            "modelId": model_id,
+        });
+        let data = self.send_and_wait(&cmd).await?;
+        let model: crate::models::ModelInfo =
+            serde_json::from_value(data)
+                .map_err(|e| format!("解析模型信息失败: {}", e))?;
+        Ok(model)
+    }
+
     /// 重置用户 session
     pub async fn reset_session(&self, user_id: &str) -> Result<(), String> {
         let _lock = self.rpc_mutex.lock().await;

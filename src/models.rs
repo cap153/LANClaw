@@ -169,3 +169,24 @@ pub struct PiResult {
     pub text: String,
     pub files: Vec<std::path::PathBuf>,
 }
+
+// ─── Model Info (from pi get_available_models / set_model) ────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub reasoning: bool,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
