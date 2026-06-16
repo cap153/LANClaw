@@ -170,6 +170,15 @@ pub struct PiResult {
     pub files: Vec<std::path::PathBuf>,
 }
 
+// ─── File Complete Event (LANClaw 接收完文件后自动触发) ──────────────
+
+#[derive(Debug, Clone)]
+pub struct FileCompleteEvent {
+    pub sender_id: String,
+    pub file_path: std::path::PathBuf,
+    pub file_name: String,
+}
+
 // ─── Model Info (from pi get_available_models / set_model) ────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

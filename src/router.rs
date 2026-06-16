@@ -124,74 +124,6 @@ pub async fn handle_message(
         return;
     }
 
-    // ─── 文件通知处理（流式） ──────────────────────────────────────────
-    let is_file_notification = content.starts_with("[文件]");
-
-    if is_file_notification {
-        let files_dir = crate::config::files_dir();
-        let latest_file = find_latest_file(&files_dir);
-
-        if let Some(file_path) = latest_file {
-            let file_name = file_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            tracing::info!("[Router] 新文件: {}", file_name);
-
-            let is_image = matches!(
-                file_path.extension().and_then(|s| s.to_str()),
-                Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg")
-            );
-
-            let prompt = if is_image {
-                format!("分析这张图片的内容，描述你看到的一切。文件名: {}", file_name)
-            } else {
-                format!("阅读这个文件 ({}), 总结其内容。如果代码则分析代码。", file_name)
-            };
-
-            // 流式分析
-            let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
-            let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
-
-            if let Some(handle) = stream_handle {
-                let result = config.rpc.prompt_stream(&from_id, &prompt, &[file_path], chunk_tx).await;
-                match result {
-                    Ok(pi_result) => {
-                        let _ = handle.await;
-                        for f in &pi_result.files {
-                            send_file_to_user(&peers, &from_id, f, config).await;
-                        }
-                    }
-                    Err(e) => {
-                        let reply = format!("❌ 分析失败: {}", e);
-                        send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
-                    }
-                }
-            } else {
-                // WS 连不上，回退到非流式
-                let result = config.rpc.prompt(&from_id, &prompt, &[file_path]).await;
-                match result {
-                    Ok(pi_result) => {
-                        send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
-                        for f in &pi_result.files {
-                            send_file_to_user(&peers, &from_id, f, config).await;
-                        }
-                    }
-                    Err(e) => {
-                        let reply = format!("❌ 分析失败: {}", e);
-                        send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
-                    }
-                }
-            }
-        } else {
-            let reply = "📁 已收到文件通知，但未找到文件数据。请稍后再试。";
-            send_to_peer(&peers, &from_id, &config.name, reply, config, None).await;
-        }
-        return;
-    }
-
     // ─── 普通文本 → 流式回复 ────────────────────────────────────
     let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
     let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
@@ -327,23 +259,4 @@ async fn send_file_to_user(
             tracing::error!("[Router] 发送文件失败: {}", e);
         }
     }
-}
-
-/// 查找 files 目录中最新的文件
-fn find_latest_file(dir: &std::path::Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && !p.extension()
-                    .and_then(|s| s.to_str())
-                    .map_or(false, |ext| ext != "downloading")
-        })
-        .max_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .ok()
-        })
 }

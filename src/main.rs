@@ -193,6 +193,10 @@ async fn main() {
     // 创建消息通道：network → router
     let (msg_tx, mut msg_rx) = messaging::message_channel();
 
+    // 创建文件完成事件通道：HTTP upload → auto pi processing
+    let (file_complete_tx, mut file_complete_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::models::FileCompleteEvent>();
+
     // ─── 启动 RPC 客户端（pi --mode rpc 常驻子进程） ──────────
     let rpc_client = match rpc_client::RpcClient::spawn(
         &bot_model,
@@ -215,6 +219,91 @@ async fn main() {
         switching_model: AtomicBool::new(false),
     });
 
+    // ─── 启动文件自动处理（上传完成 → pi） ──────────────────────
+    let fp_peers = peers.clone();
+    let fp_rpc = rpc_client.clone();
+    let fp_bot_id = bot_id.clone();
+    let fp_bot_name = bot_name.clone();
+    tokio::spawn(async move {
+        use crate::network::file;
+        use crate::network::messaging;
+        use tokio::sync::mpsc;
+
+        while let Some(event) = file_complete_rx.recv().await {
+            if event.sender_id.is_empty() {
+                tracing::warn!("[FileAuto] sender_id 为空，跳过");
+                continue;
+            }
+
+            let peer_addr = {
+                let map = fp_peers.read().await;
+                map.get(&event.sender_id).map(|p| p.addr.clone())
+            };
+
+            let Some(addr) = peer_addr else {
+                tracing::warn!("[FileAuto] 发送者 {} 不在线，跳过", &event.sender_id[..8]);
+                continue;
+            };
+
+            tracing::info!(
+                "[FileAuto] 开始处理文件 {} (来自 {})",
+                event.file_name,
+                &event.sender_id[..8]
+            );
+
+            let prompt = format!("用户上传了一个文件: {}", event.file_name);
+
+            // 流式回复
+            let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let bot_id = fp_bot_id.clone();
+            let bot_name = fp_bot_name.clone();
+            let addr_clone = addr.clone();
+
+            let send_handle = tokio::spawn(async move {
+                if let Err(e) = messaging::send_stream_chunks(
+                    &addr_clone, bot_id, bot_name, chunk_rx, ts,
+                )
+                .await
+                {
+                    tracing::error!("[FileAuto] 流式发送失败: {}", e);
+                }
+            });
+
+            let result = fp_rpc
+                .prompt_stream(&event.sender_id, &prompt, &[event.file_path.clone()], chunk_tx)
+                .await;
+
+            match result {
+                Ok(pi_result) => {
+                    let _ = send_handle.await;
+                    // 发送 pi 生成的文件
+                    for f in &pi_result.files {
+                        if let Err(e) = file::send_file_to_peer(&addr, &fp_bot_id, f).await {
+                            tracing::error!("[FileAuto] 发送生成文件失败: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let reply = format!("❌ 文件处理失败: {}", e);
+                    let _ = messaging::send_text_message(
+                        &addr,
+                        fp_bot_id.clone(),
+                        fp_bot_name.clone(),
+                        reply,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        tracing::error!("[FileAuto] 文件处理通道意外关闭");
+    });
+
     // ─── 启动 UDP 发现 ──────────────────────────────────────────
     let announce_id = bot_id.clone();
     let announce_name = bot_name.clone();
@@ -233,6 +322,7 @@ async fn main() {
     // ─── 启动 HTTP + WebSocket 服务器 ────────────────────────────
     let shared_state = Arc::new(AppState {
         msg_tx: msg_tx.clone(),
+        file_complete_tx: file_complete_tx.clone(),
     });
 
     // HTTP + WS 路由

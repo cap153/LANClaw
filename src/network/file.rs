@@ -6,11 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config;
+use crate::models::FileCompleteEvent;
+use tokio::sync::mpsc;
 
 /// 应用层共享状态
 #[derive(Clone)]
 pub struct AppState {
     pub msg_tx: crate::network::messaging::MessageSender,
+    pub file_complete_tx: mpsc::UnboundedSender<FileCompleteEvent>,
 }
 
 /// 构建文件路由
@@ -22,7 +25,7 @@ pub fn file_routes() -> Router<Arc<AppState>> {
 
 /// 上传文件处理（兼容 LANChat 分块协议）
 async fn upload_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let mut file_name = String::new();
@@ -127,6 +130,12 @@ async fn upload_handler(
                     size_str,
                     sender_id
                 );
+                // 自动触发 pi 处理
+                let _ = state.file_complete_tx.send(FileCompleteEvent {
+                    sender_id: sender_id.clone(),
+                    file_path: final_path.clone(),
+                    file_name: final_name.clone(),
+                });
             }
             Err(e) => {
                 eprintln!("[File] 重命名失败: {}", e);
