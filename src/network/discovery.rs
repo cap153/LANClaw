@@ -25,6 +25,9 @@ fn create_socket(bind_addr: &str, is_listener: bool) -> Result<std::net::UdpSock
         let multi_addr: Ipv4Addr = MULTICAST_IP.parse().unwrap();
         let interface: Ipv4Addr = "0.0.0.0".parse().unwrap();
         let _ = std_socket.join_multicast_v4(&multi_addr, &interface);
+    } else {
+        std_socket.set_broadcast(true)?;
+        let _ = std_socket.set_multicast_ttl_v4(1);
     }
 
     Ok(std_socket)
