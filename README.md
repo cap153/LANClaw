@@ -135,7 +135,29 @@ lanclaw --port 8889
 
 LANClaw and LANChat on different machines can both use port 8888 without conflict.
 
-> **Tip**: When LANClaw runs on a different port, use LANChat's **manual discovery** feature to add the bot's address (`<IP>:<port>`) for cross-port automatic discovery. Once either side receives a heartbeat, the reply mechanism ensures both sides find each other.
+> [!TIP]
+> When LANClaw runs on a different port, use LANChat's **manual discovery** feature to add the bot's address (`<IP>:<port>`) for cross-port automatic discovery. Once either side receives a heartbeat, the reply mechanism ensures both sides find each other.
+
+## Project Structure
+
+```
+lanclaw/                 # LANClaw AI Robot
+├── src/
+│   ├── main.rs          # Entrance
+│   ├── config.rs        # Configuration Management
+│   ├── models.rs        # Data Model
+│   ├── router.rs        # Message routing (text/file/command)
+│   ├── rpc_client.rs    # Pi RPC Client
+│   ├── pi_bridge.rs     # Pi process management
+│   ├── scheduler.rs     # Scheduled task engine
+│   ├── skill_gen.rs     # Pi Skill file generation
+│   └── network/         # Network module
+│       ├── discovery.rs # UDP discovery
+│       ├── messaging.rs # WebSocket messages
+│       ├── mod.rs       # HTTP Routing
+│       └── file.rs      # File upload/download
+└── Cargo.toml
+```
 
 ## License
 
