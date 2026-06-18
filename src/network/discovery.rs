@@ -78,6 +78,7 @@ pub async fn start_announcing(port: u16, bot_id: String, bot_name: String) {
 pub async fn start_listening(
     port: u16,
     my_id: String,
+    bot_name: String,
     peers: PeerMap,
 ) {
     let bind_addr = format!("0.0.0.0:{}", port);
@@ -137,6 +138,16 @@ pub async fn start_listening(
 
                     if was_offline {
                         println!("[UDP] 用户上线: {} ({})", name, peer_id);
+                    }
+
+                    // 回复心跳给对方（无 |1 标记则为原始心跳，需回复）
+                    if parts.len() <= 6 {
+                        let reply = format!(
+                            "LANChat|ONLINE|{}|{}|{}|0|1",
+                            my_id, bot_name, port
+                        );
+                        let target = format!("{}:{}", addr.ip(), peer_port);
+                        let _ = socket.send_to(reply.as_bytes(), target).await;
                     }
                 }
             }

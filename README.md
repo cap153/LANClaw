@@ -1,6 +1,8 @@
 # LANClaw
 
 > A LANChat-compatible intelligent bot powered by [Pi](https://pi.dev) coding agent.
+>
+> 📖 [中文文档](README_CN.md)
 
 LANClaw registers itself as a peer on the LANChat network, receives messages and files from online users, forwards them to Pi for AI processing, and sends responses back.
 
@@ -8,6 +10,7 @@ LANClaw registers itself as a peer on the LANChat network, receives messages and
 
 - 🤖 **LANChat-compatible** — speaks the same UDP/TCP/HTTP/WebSocket protocol as LANChat, no modifications needed
 - 🧠 **AI-powered by Pi** — uses `pi -p --session` for per-user persistent conversations
+- 🔄 **Cross-port discovery** — automatically replies to received heartbeats, enabling discovery across different ports and subnets
 - 📁 **File analysis** — receives images/documents from users, passes them to Pi for analysis
 - 📤 **File sending** — Pi can write files that LANClaw automatically delivers to users
 - ⏰ **Scheduled tasks** — one-shot reminders and recurring tasks, managed via Pi skill
@@ -69,11 +72,12 @@ CLI flags override config file settings.
 ```
 
 1. **UDP Discovery** — LANClaw broadcasts heartbeats like any LANChat peer, users see it online
-2. **Message Receiving** — LANChat users send messages via WebSocket/TCP to LANClaw's port
-3. **AI Processing** — LANClaw calls `pi -p --session <user_id> "message"` for each user
-4. **Response** — Pi's text reply is sent back; files Pi generates are uploaded to the user
-5. **File Handling** — Files from users are saved and passed to Pi for analysis (images, documents)
-6. **Scheduled Tasks** — Pi manages tasks via `lanclaw task add/list/cancel/logs` CLI commands
+2. **Heartbeat reply** — when receiving a heartbeat from another peer, LANClaw sends one back immediately. This ensures automatic discovery across different ports or subnets with zero configuration
+3. **Message Receiving** — LANChat users send messages via WebSocket/TCP to LANClaw's port
+4. **AI Processing** — LANClaw calls `pi -p --session <user_id> "message"` for each user
+5. **Response** — Pi's text reply is sent back; files Pi generates are uploaded to the user
+6. **File Handling** — Files from users are saved and passed to Pi for analysis (images, documents)
+7. **Scheduled Tasks** — Pi manages tasks via `lanclaw task add/list/cancel/logs` CLI commands
 
 ## Data Storage
 
@@ -95,8 +99,8 @@ Users on your LANChat network will see the bot in their peer list. They can:
 - **Send files/images** — the bot analyzes them with Pi
 - **Create reminders** — say "remind me in 30 minutes" and Pi creates a scheduled task
 - **Query tasks** — ask "what tasks are scheduled?" and Pi checks
-
-The only command LANClaw interprets directly is `/new`, which resets your conversation session.
+- **Switch model** — send `/model` to list available models, `/model select <provider> <modelId>` to switch
+- **Reset session** — send `/new` to start a fresh conversation
 
 ## CLI Reference
 

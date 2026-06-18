@@ -315,8 +315,9 @@ async fn main() {
     let listen_id = bot_id.clone();
     let listen_peers = peers.clone();
     let listen_port = port;
+    let listen_name = bot_name.clone();
     tokio::spawn(async move {
-        network::discovery::start_listening(listen_port, listen_id, listen_peers).await;
+        network::discovery::start_listening(listen_port, listen_id, listen_name, listen_peers).await;
     });
 
     // ─── 启动 HTTP + WebSocket 服务器 ────────────────────────────
