@@ -135,6 +135,8 @@ lanclaw --port 8889
 
 LANClaw and LANChat on different machines can both use port 8888 without conflict.
 
+> **Tip**: When LANClaw runs on a different port, use LANChat's **manual discovery** feature to add the bot's address (`<IP>:<port>`) for cross-port automatic discovery. Once either side receives a heartbeat, the reply mechanism ensures both sides find each other.
+
 ## License
 
 MIT

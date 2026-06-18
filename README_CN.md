@@ -135,6 +135,29 @@ lanclaw --port 8889
 
 不同机器上的 LANClaw 和 LANChat 可以同时使用 8888 端口，互不冲突。
 
+> **提示**：当 LANClaw 使用不同端口时，在 LANChat 的**手动发现**功能中添加机器人的地址（`<IP>:<端口>`），即可跨端口自动发现。任一端收到心跳后，回复机制会让双方自动互相发现。
+
+## 项目结构
+
+```
+lanclaw/                 # LANClaw AI 机器人
+├── src/
+│   ├── main.rs          # 入口
+│   ├── config.rs        # 配置管理
+│   ├── models.rs        # 数据模型
+│   ├── router.rs        # 消息路由（文本/文件/命令）
+│   ├── rpc_client.rs    # Pi RPC 客户端
+│   ├── pi_bridge.rs     # Pi 进程管理
+│   ├── scheduler.rs     # 定时任务引擎
+│   ├── skill_gen.rs     # Pi Skill 文件生成
+│   └── network/         # 网络模块
+│       ├── discovery.rs # UDP 发现
+│       ├── messaging.rs # WebSocket 消息
+│       ├── mod.rs       # HTTP 路由
+│       └── file.rs      # 文件上传/下载
+└── Cargo.toml
+```
+
 ## 许可证
 
 MIT
