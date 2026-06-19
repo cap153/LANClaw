@@ -225,6 +225,7 @@ async fn main() {
     let fp_bot_id = bot_id.clone();
     let fp_bot_name = bot_name.clone();
     tokio::spawn(async move {
+        use crate::models::StreamChunk;
         use crate::network::file;
         use crate::network::messaging;
         use tokio::sync::mpsc;
@@ -254,7 +255,7 @@ async fn main() {
             let prompt = format!("用户上传了一个文件: {}", event.file_name);
 
             // 流式回复
-            let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
+            let (chunk_tx, chunk_rx) = mpsc::channel::<StreamChunk>(8);
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -1,4 +1,4 @@
-use crate::models::{HandshakeMessage, TextMessage};
+use crate::models::{HandshakeMessage, StreamChunk, TextMessage};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -12,8 +12,6 @@ pub fn message_channel() -> (MessageSender, MessageReceiver) {
 }
 
 /// 向一个 peer 发送文本消息（首选 WebSocket，回退 TCP）
-/// `min_timestamp` 可选：回复消息时传入原始消息的 timestamp，
-/// 确保回复的时间戳 ≥ 原始消息时间戳，避免因时钟偏差导致排序错乱
 pub async fn send_text_message(
     peer_addr: &str,
     from_id: String,
@@ -37,7 +35,6 @@ pub async fn send_text_message(
 
     let json = serde_json::to_string(&message).map_err(|e| format!("序列化失败: {}", e))?;
 
-    // 尝试 WebSocket
     let ws_url = format!("ws://{}/ws", peer_addr);
     match tokio_tungstenite::connect_async(&ws_url).await {
         Ok((mut ws_stream, _)) => {
@@ -50,14 +47,12 @@ pub async fn send_text_message(
             Ok(())
         }
         Err(e) => {
-            // 回退 TCP
             eprintln!("[MSG] WS 连接失败 ({}), 尝试 TCP", e);
             send_via_tcp(peer_addr, &message).await
         }
     }
 }
 
-/// 通过原始 TCP 发送（LANChat 桌面端兼容）
 async fn send_via_tcp(peer_addr: &str, message: &TextMessage) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let mut stream = tokio::net::TcpStream::connect(peer_addr)
@@ -79,13 +74,15 @@ async fn send_via_tcp(peer_addr: &str, message: &TextMessage) -> Result<(), Stri
     Ok(())
 }
 
-/// 流式发送：通过同一个 WebSocket 逐 chunk 发送回复内容
-/// 收到 `chunks` 关闭时自动标记最后一条为 `stream_final: true`
+/// 流式发送。
+/// - thinking/text 的每个 delta 都实时发 WS（保证流式效果）
+/// - final_segments 只积累每个 phase 的最终值（用于 DB 保存的完整摘要）
+/// - stream_final: true 只出现在 segs_content 消息上（确保只存一条）
 pub async fn send_stream_chunks(
     peer_addr: &str,
     from_id: String,
     from_name: String,
-    mut chunks: mpsc::Receiver<String>,
+    mut chunks: mpsc::Receiver<StreamChunk>,
     min_timestamp: u64,
 ) -> Result<(), String> {
     let ws_url = format!("ws://{}/ws", peer_addr);
@@ -94,39 +91,126 @@ pub async fn send_stream_chunks(
         .map_err(|e| format!("WS 连接失败: {}", e))?;
 
     let stream_id = uuid::Uuid::new_v4().to_string();
-    let mut pending: Option<String> = None;
-    // 所有 chunk 使用相同时间戳（紧跟在用户消息之后），防止 seq 累加导致时间戳偏大
     let ts = min_timestamp.saturating_add(1);
 
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    // 积累最终段落（每个连续 phase 只产生一段）
+    let mut final_segments: Vec<StreamChunk> = Vec::new();
+    let mut pending_thinking: Option<String> = None;
+    let mut pending_text: Option<String> = None;
+
+    /// 将 pending_thinking 刷入 final_segments
+    fn flush_thinking(segments: &mut Vec<StreamChunk>, buf: &mut Option<String>) {
+        if let Some(content) = buf.take() {
+            segments.push(StreamChunk::Text { content, is_thinking: true });
+        }
+    }
+
+    /// 将 pending_text 刷入 final_segments
+    fn flush_text_final(segments: &mut Vec<StreamChunk>, buf: &mut Option<String>) {
+        if let Some(content) = buf.take() {
+            segments.push(StreamChunk::Text { content, is_thinking: false });
+        }
+    }
+
     loop {
         let chunk = chunks.recv().await;
         match chunk {
-            Some(text) => {
-                // 发送前一段（非 final）
-                if let Some(prev) = pending.take() {
-                    let json = stream_json(&from_id, &from_name, &prev, ts, &stream_id, false);
-                    ws_stream.send(WsMessage::Text(json.into())).await.map_err(|e| e.to_string())?;
-                }
-                pending = Some(text);
+            Some(StreamChunk::Text { content, is_thinking }) if is_thinking => {
+                // 实时 WS（流式）
+                let json = stream_chunk_json(&from_id, &from_name, &content, ts, &stream_id, false, true);
+                let _ = ws_stream.send(WsMessage::Text(json.into())).await;
+                // 积累最终值
+                pending_thinking = Some(content);
+            }
+            Some(StreamChunk::Text { content, is_thinking: false }) => {
+                // 实时 WS
+                let json = stream_chunk_json(&from_id, &from_name, &content, ts, &stream_id, false, false);
+                let _ = ws_stream.send(WsMessage::Text(json.into())).await;
+                // 如果之前有 thinking 段，结束它
+                flush_thinking(&mut final_segments, &mut pending_thinking);
+                // 积累最终 text
+                pending_text = Some(content);
+            }
+            Some(StreamChunk::ToolCall { name, args }) => {
+                // 结束当前 thinking / text phase
+                flush_thinking(&mut final_segments, &mut pending_thinking);
+                flush_text_final(&mut final_segments, &mut pending_text);
+                // tool_call 实时 WS
+                let json = serde_json::json!({
+                    "msg_type": "tool_call",
+                    "from_id": &from_id,
+                    "from_name": &from_name,
+                    "tool_name": &name,
+                    "tool_args": &args,
+                    "timestamp": ts,
+                    "stream_id": &stream_id,
+                    "stream_final": false,
+                }).to_string();
+                let _ = ws_stream.send(WsMessage::Text(json.into())).await;
+                final_segments.push(StreamChunk::ToolCall { name, args });
+            }
+            Some(StreamChunk::ToolResult { output, is_error }) => {
+                flush_thinking(&mut final_segments, &mut pending_thinking);
+                flush_text_final(&mut final_segments, &mut pending_text);
+                let json = serde_json::json!({
+                    "msg_type": "tool_result",
+                    "from_id": &from_id,
+                    "from_name": &from_name,
+                    "tool_output": &output,
+                    "is_error": is_error,
+                    "timestamp": ts,
+                    "stream_id": &stream_id,
+                    "stream_final": false,
+                }).to_string();
+                let _ = ws_stream.send(WsMessage::Text(json.into())).await;
+                final_segments.push(StreamChunk::ToolResult { output, is_error });
+            }
+            Some(other) => {
+                final_segments.push(other);
             }
             None => {
-                // 通道关闭 → 最后一段标记 final
-                if let Some(last) = pending.take() {
-                    let json = stream_json(&from_id, &from_name, &last, ts, &stream_id, true);
-                    ws_stream.send(WsMessage::Text(json.into())).await.map_err(|e| e.to_string())?;
-                }
+                // 通道关闭：结束最后一段 thinking/text，然后只发 segs_content（stream_final: true）
+                flush_thinking(&mut final_segments, &mut pending_thinking);
+                flush_text_final(&mut final_segments, &mut pending_text);
+
+                // 发送完整段落 JSON（stream_final: true，只有这一条会被存 DB）
+                let segs: Vec<serde_json::Value> = final_segments.iter().map(|s| match s {
+                    StreamChunk::Text { content, is_thinking } => {
+                        serde_json::json!({"type": if *is_thinking { "thinking" } else { "text" }, "content": content})
+                    }
+                    StreamChunk::ToolCall { name, args } => {
+                        serde_json::json!({"type": "tool_call", "name": name, "args": args})
+                    }
+                    StreamChunk::ToolResult { output, is_error } => {
+                        serde_json::json!({"type": "tool_result", "output": output, "is_error": is_error})
+                    }
+                }).collect();
+
+                let summary_json = serde_json::json!({
+                    "msg_type": "text",
+                    "from_id": &from_id,
+                    "from_name": &from_name,
+                    "content": serde_json::json!({"v": 2, "segments": segs}).to_string(),
+                    "timestamp": ts,
+                    "stream_id": &stream_id,
+                    "stream_final": true,
+                    "is_thinking": false,
+                    "segs_content": true,
+                }).to_string();
+                let _ = ws_stream.send(WsMessage::Text(summary_json.into())).await;
                 break;
             }
         }
     }
 
     let _ = ws_stream.close(None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     Ok(())
 }
 
-fn stream_json(from_id: &str, from_name: &str, content: &str, timestamp: u64, stream_id: &str, is_final: bool) -> String {
+fn stream_chunk_json(from_id: &str, from_name: &str, content: &str, timestamp: u64, stream_id: &str, is_final: bool, is_thinking: bool) -> String {
     serde_json::json!({
         "msg_type": "text",
         "from_id": from_id,
@@ -135,10 +219,10 @@ fn stream_json(from_id: &str, from_name: &str, content: &str, timestamp: u64, st
         "timestamp": timestamp,
         "stream_id": stream_id,
         "stream_final": is_final,
+        "is_thinking": is_thinking,
     }).to_string()
 }
 
-/// 发送文件消息通知给 peer（告知对方有文件可下载）"}]
 #[allow(dead_code)]
 pub async fn send_file_notification(
     peer_addr: &str,
@@ -147,15 +231,12 @@ pub async fn send_file_notification(
     file_name: String,
     file_size: u64,
 ) -> Result<(), String> {
-    // 文件消息使用 LANChat 格式：构造一个 file 类型的文本消息
     let content = format!("[文件] {} ({} 字节)", file_name, file_size);
     send_text_message(peer_addr, from_id, from_name, content, None).await
 }
 
 // ─── axum WebSocket Handler ────────────────────────────────────────────────
 
-/// WebSocket 连接处理（axum 的 ws 回调）
-/// 接收 LANChat 发来的消息，通过 channel 转发给 router
 pub async fn handle_ws_connection(
     socket: WebSocket,
     tx: MessageSender,
@@ -167,9 +248,7 @@ pub async fn handle_ws_connection(
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                // 尝试解析为 TextMessage
                 if let Ok(tm) = serde_json::from_str::<TextMessage>(&text) {
-                    // 消息内容由 [RPC] prompt 日志覆盖
                     let _ = tx.send((tm, peer_addr));
                 } else if let Ok(_hm) =
                     serde_json::from_str::<HandshakeMessage>(&text)

@@ -1,5 +1,5 @@
 use crate::config;
-use crate::models::PiResult;
+use crate::models::{PiResult, StreamChunk};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +14,9 @@ enum RpcEvent {
     Response { success: bool, data: Option<Value>, error: Option<String> },
     AgentEnd,
     TextDelta { text: String },
+    ThinkingDelta { text: String },
+    ToolCallEnd { tool_name: String, tool_args: String },
+    ToolExecutionEnd { output: String, is_error: bool },
     Other { event_type: String },
 }
 
@@ -23,6 +26,9 @@ impl RpcEvent {
             RpcEvent::Response { .. } => "response",
             RpcEvent::AgentEnd => "agent_end",
             RpcEvent::TextDelta { .. } => "text_delta",
+            RpcEvent::ThinkingDelta { .. } => "thinking_delta",
+            RpcEvent::ToolCallEnd { .. } => "toolcall_end",
+            RpcEvent::ToolExecutionEnd { .. } => "tool_execution_end",
             RpcEvent::Other { event_type } => event_type,
         }
     }
@@ -36,15 +42,7 @@ impl RpcEvent {
             RpcEvent::Response { success, data, error } => Some((success, data, error)),
             _ => None,
         }
-    }
-
-    fn into_text_delta(self) -> Option<String> {
-        match self {
-            RpcEvent::TextDelta { text } => Some(text),
-            _ => None,
-        }
-    }
-}
+    }}
 
 // ─── RPC 子进程管理 ─────────────────────────────────────────────────────────
 
@@ -380,14 +378,14 @@ impl RpcClient {
         Ok(String::new())
     }
 
-    /// 流式 prompt：通过 chunk_tx 逐段发送累积文本
+    /// 流式 prompt：通过 chunk_tx 逐段发送累积文本/思考/工具事件
     /// 保持互斥锁直到回复完成
     pub async fn prompt_stream(
         self: &Arc<Self>,
         user_id: &str,
         message: &str,
         files: &[PathBuf],
-        chunk_tx: mpsc::Sender<String>,
+        chunk_tx: mpsc::Sender<StreamChunk>,
     ) -> Result<PiResult, String> {
         let _lock = self.rpc_mutex.lock().await;
 
@@ -449,11 +447,12 @@ impl RpcClient {
         Ok(PiResult { text, files: generated_files })
     }
 
-    /// 等待 agent_end，同时收集 text_delta 组成完整回复
+    /// 等待 agent_end，同时收集 text_delta / thinking_delta / tool 事件
     /// 如果传了 chunk_tx，每个 delta 后把累积文本发过去（流式）
-    async fn wait_for_text(&self, chunk_tx: Option<mpsc::Sender<String>>) -> Result<String, String> {
+    async fn wait_for_text(&self, chunk_tx: Option<mpsc::Sender<StreamChunk>>) -> Result<String, String> {
         let mut event_rx = self.event_rx.lock().await;
-        let mut text = String::new();
+        let mut thinking_buf = String::new();
+        let mut response_buf = String::new();
 
         loop {
             let event = event_rx
@@ -462,13 +461,54 @@ impl RpcClient {
                 .ok_or_else(|| "RPC 事件通道关闭".to_string())?;
 
             if event.is_agent_end() {
-                return Ok(text);
+                return Ok(response_buf);
             }
 
-            if let Some(delta) = event.into_text_delta() {
-                text.push_str(&delta);
-                if let Some(ref tx) = chunk_tx {
-                    let _ = tx.send(text.clone()).await;
+            match event {
+                RpcEvent::TextDelta { text } => {
+                    response_buf.push_str(&text);
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx
+                            .send(StreamChunk::Text {
+                                content: response_buf.clone(),
+                                is_thinking: false,
+                            })
+                            .await;
+                    }
+                }
+                RpcEvent::ThinkingDelta { text } => {
+                    thinking_buf.push_str(&text);
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx
+                            .send(StreamChunk::Text {
+                                content: thinking_buf.clone(),
+                                is_thinking: true,
+                            })
+                            .await;
+                    }
+                }
+                RpcEvent::ToolCallEnd { tool_name, tool_args } => {
+                    // 重置 response 段——后续 text 作为新的独立段落
+                    response_buf.clear();
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx
+                            .send(StreamChunk::ToolCall {
+                                name: tool_name,
+                                args: tool_args,
+                            })
+                            .await;
+                    }
+                }
+                RpcEvent::ToolExecutionEnd { output, is_error } => {
+                    if let Some(ref tx) = chunk_tx {
+                        let _ = tx
+                            .send(StreamChunk::ToolResult { output, is_error })
+                            .await;
+                    }
+                }
+                _ => {
+                    // 忽略其他事件
+                    tracing::trace!("[RPC] wait_for_text 跳过事件");
                 }
             }
         }
@@ -526,22 +566,66 @@ impl RpcClient {
             },
             "agent_end" => RpcEvent::AgentEnd,
             "message_update" => {
-                let is_text = val
+                let msg_type = val
                     .get("assistantMessageEvent")
                     .and_then(|e| e.get("type"))
                     .and_then(|t| t.as_str())
-                    == Some("text_delta");
-                if is_text {
-                    let delta = val
-                        .get("assistantMessageEvent")
-                        .and_then(|e| e.get("delta"))
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    RpcEvent::TextDelta { text: delta }
-                } else {
-                    RpcEvent::Other { event_type: event_type.to_string() }
+                    .unwrap_or("");
+                match msg_type {
+                    "text_delta" => {
+                        let delta = val
+                            .get("assistantMessageEvent")
+                            .and_then(|e| e.get("delta"))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        RpcEvent::TextDelta { text: delta }
+                    }
+                    "thinking_delta" => {
+                        let delta = val
+                            .get("assistantMessageEvent")
+                            .and_then(|e| e.get("delta"))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        RpcEvent::ThinkingDelta { text: delta }
+                    }
+                    "toolcall_end" => {
+                        let tool_call = val
+                            .get("assistantMessageEvent")
+                            .and_then(|e| e.get("toolCall"));
+                        let tool_name = tool_call
+                            .and_then(|tc| tc.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let tool_args = tool_call
+                            .and_then(|tc| tc.get("arguments"))
+                            .map(|a| {
+                                if let Some(s) = a.as_str() {
+                                    s.to_string()
+                                } else {
+                                    a.to_string()
+                                }
+                            })
+                            .unwrap_or_default();
+                        RpcEvent::ToolCallEnd { tool_name, tool_args }
+                    }
+                    _ => RpcEvent::Other { event_type: event_type.to_string() },
                 }
+            }
+            "tool_execution_end" => {
+                let result = val.get("result");
+                let output = result
+                    .and_then(|r| r.get("content"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|first| first.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_error = val.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+                RpcEvent::ToolExecutionEnd { output, is_error }
             }
             _ => RpcEvent::Other {
                 event_type: event_type.to_string(),

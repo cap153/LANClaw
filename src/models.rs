@@ -170,6 +170,18 @@ pub struct PiResult {
     pub files: Vec<std::path::PathBuf>,
 }
 
+// ─── 流式 chunk（从 rpc_client 到 messaging 的内部通道类型） ───
+
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// 文本回复或思考内容
+    Text { content: String, is_thinking: bool },
+    /// 工具调用
+    ToolCall { name: String, args: String },
+    /// 工具执行结果
+    ToolResult { output: String, is_error: bool },
+}
+
 // ─── File Complete Event (LANClaw 接收完文件后自动触发) ──────────────
 
 #[derive(Debug, Clone)]

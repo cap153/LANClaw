@@ -1,4 +1,4 @@
-use crate::models::{PeerMap, TextMessage};
+use crate::models::{PeerMap, StreamChunk, TextMessage};
 use crate::network::messaging;
 use crate::rpc_client::RpcClient;
 use std::net::SocketAddr;
@@ -125,7 +125,7 @@ pub async fn handle_message(
     }
 
     // ─── 普通文本 → 流式回复 ────────────────────────────────────
-    let (chunk_tx, chunk_rx) = mpsc::channel::<String>(8);
+    let (chunk_tx, chunk_rx) = mpsc::channel::<StreamChunk>(8);
     let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
 
     if let Some(handle) = stream_handle {
@@ -202,7 +202,7 @@ async fn send_to_peer_stream(
     peers: &PeerMap,
     target_id: &str,
     bot_name: &str,
-    chunk_rx: mpsc::Receiver<String>,
+    chunk_rx: mpsc::Receiver<StreamChunk>,
     bot_id: String,
     min_timestamp: u64,
 ) -> Option<tokio::task::JoinHandle<()>> {
