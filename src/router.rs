@@ -95,24 +95,20 @@ pub async fn handle_message(
             send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             return;
         }
-        let provider = parts[0].trim();
+        let _provider = parts[0].trim();
         let model_id = parts[1].trim();
 
         config.switching_model.store(true, Ordering::Release);
 
-        let result = config.rpc.set_model(provider, model_id).await;
-        match result {
-            Ok(model_info) => {
-                let model_name = if !model_info.name.is_empty() {
-                    model_info.name.clone()
-                } else {
-                    model_info.id.clone()
-                };
-                // 更新本地配置
-                let mut cfg = crate::config::Config::load();
-                cfg.update_model(&model_id);
-                // 同时更新 BotConfig 中的 rpc 模型（下次起 spawn 会使用新模型，但当前 rpc 已切换）
-                let reply = format!("✅ 已切换到模型: {} ({} / {})", model_name, model_info.provider, model_info.id);
+        // 更新配置文件
+        let mut cfg = crate::config::Config::load();
+        cfg.update_model(model_id);
+
+        // 重启 pi 子进程（杀掉旧进程，用新模型重新 spawn）
+        let thinking = cfg.thinking.clone();
+        match config.rpc.restart(model_id, &thinking).await {
+            Ok(_) => {
+                let reply = format!("✅ 已切换到模型: {}，pi 子进程已重启", model_id);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
             Err(e) => {

@@ -47,19 +47,40 @@ impl RpcEvent {
 // ─── RPC 子进程管理 ─────────────────────────────────────────────────────────
 
 pub struct RpcClient {
-    stdin_tx: mpsc::Sender<String>,
+    stdin_tx: Mutex<mpsc::Sender<String>>,
     event_rx: Mutex<mpsc::Receiver<RpcEvent>>,
     rpc_mutex: Mutex<()>,
-    #[allow(dead_code)]
-    child: tokio::process::Child,
+    child: Mutex<tokio::process::Child>,
 }
 
 impl RpcClient {
     /// 启动 pi --mode rpc 子进程，开始监听事件流
     pub async fn spawn(model: &str, thinking: &str) -> Result<Arc<Self>, String> {
-        let (mut cmd, log_cmd) = Self::build_rpc_command(model, thinking);
-
+        let (_, log_cmd) = Self::build_rpc_command(model, thinking);
         tracing::info!("[RPC] 启动:\n    {}", log_cmd);
+
+        let (stdin_tx, event_rx, child) = Self::spawn_inner(model, thinking).await?;
+
+        let client = Arc::new(Self {
+            stdin_tx: Mutex::new(stdin_tx),
+            event_rx: Mutex::new(event_rx),
+            rpc_mutex: Mutex::new(()),
+            child: Mutex::new(child),
+        });
+
+        // 等待 RPC 启动就绪
+        let state_cmd = serde_json::json!({ "type": "get_state" });
+        match client.send_and_wait(&state_cmd).await {
+            Ok(_) => tracing::info!("[RPC] 子进程就绪"),
+            Err(e) => tracing::warn!("[RPC] 启动验证异常: {}", e),
+        }
+
+        Ok(client)
+    }
+
+    /// 提取子进程创建逻辑，供 spawn 和 restart 共用
+    async fn spawn_inner(model: &str, thinking: &str) -> Result<(mpsc::Sender<String>, mpsc::Receiver<RpcEvent>, tokio::process::Child), String> {
+        let (mut cmd, _) = Self::build_rpc_command(model, thinking);
 
         let mut child = cmd
             .stdin(std::process::Stdio::piped())
@@ -117,21 +138,7 @@ impl RpcClient {
             }
         });
 
-        let client = Arc::new(Self {
-            stdin_tx,
-            event_rx: Mutex::new(event_rx),
-            rpc_mutex: Mutex::new(()),
-            child,
-        });
-
-        // 等待 RPC 启动就绪
-        let state_cmd = serde_json::json!({ "type": "get_state" });
-        match client.send_and_wait(&state_cmd).await {
-            Ok(_) => tracing::info!("[RPC] 子进程就绪"),
-            Err(e) => tracing::warn!("[RPC] 启动验证异常: {}", e),
-        }
-
-        Ok(client)
+        Ok((stdin_tx, event_rx, child))
     }
 
     // ─── 构建启动参数 ─────────────────────────────────────────────────────
@@ -294,19 +301,44 @@ impl RpcClient {
         }
     }
 
-    /// 切换到指定模型
-    pub async fn set_model(&self, provider: &str, model_id: &str) -> Result<crate::models::ModelInfo, String> {
+    /// 重启 pi 子进程（杀掉旧进程，用新模型重新 spawn）
+    pub async fn restart(&self, model: &str, thinking: &str) -> Result<(), String> {
         let _lock = self.rpc_mutex.lock().await;
-        let cmd = serde_json::json!({
-            "type": "set_model",
-            "provider": provider,
-            "modelId": model_id,
-        });
-        let data = self.send_and_wait(&cmd).await?;
-        let model: crate::models::ModelInfo =
-            serde_json::from_value(data)
-                .map_err(|e| format!("解析模型信息失败: {}", e))?;
-        Ok(model)
+        tracing::info!("[RPC] 重启 pi 子进程: model={}", model);
+
+        // 先创建新进程（成功后再杀旧进程，减少宕机时间）
+        let (new_stdin_tx, new_event_rx, new_child) = Self::spawn_inner(model, thinking).await?;
+
+        // 换入新通道和新进程
+        let old_stdin = std::mem::replace(&mut *self.stdin_tx.lock().await, new_stdin_tx);
+        let old_event_rx = std::mem::replace(&mut *self.event_rx.lock().await, new_event_rx);
+        let old_child = std::mem::replace(&mut *self.child.lock().await, new_child);
+
+        // 验证新进程就绪
+        let state_cmd = serde_json::json!({ "type": "get_state" });
+        match self.send_and_wait(&state_cmd).await {
+            Ok(data) => {
+                // 成功，丢弃旧进程（kill_on_drop 自动杀死）
+                drop(old_child);
+                drop(old_stdin);
+                drop(old_event_rx);
+                // 打印新模型信息
+                let new_model_id = data.get("model")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                tracing::info!("[RPC] 重启成功，当前模型: {}", new_model_id);
+                Ok(())
+            }
+            Err(e) => {
+                // 回滚：恢复旧进程
+                tracing::error!("[RPC] 新进程验证失败，回滚: {}", e);
+                let _ = std::mem::replace(&mut *self.stdin_tx.lock().await, old_stdin);
+                let _ = std::mem::replace(&mut *self.event_rx.lock().await, old_event_rx);
+                let _ = std::mem::replace(&mut *self.child.lock().await, old_child);
+                Err(format!("新 pi 子进程未就绪: {}", e))
+            }
+        }
     }
 
     /// 重置用户 session
@@ -336,6 +368,8 @@ impl RpcClient {
     async fn send_and_wait(&self, cmd: &Value) -> Result<Value, String> {
         let cmd_str = serde_json::to_string(cmd).map_err(|e| format!("序列化失败: {}", e))?;
         self.stdin_tx
+            .lock()
+            .await
             .send(cmd_str)
             .await
             .map_err(|e| format!("发送命令失败: {}", e))?;
