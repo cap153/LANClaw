@@ -134,6 +134,15 @@ pub async fn start_listening(
                     entry.last_seen = now;
                     entry.is_offline = false;
 
+                    // 持久化 peer 信息（供 send-file CLI 使用）
+                    let peers_snapshot = map.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(content) = serde_json::to_string(&peers_snapshot) {
+                            let path = crate::config::peers_path();
+                            let _ = std::fs::write(&path, content);
+                        }
+                    });
+
                     drop(map);
 
                     if was_offline {

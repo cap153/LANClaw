@@ -2,7 +2,6 @@ use crate::models::{PeerMap, StreamChunk, TextMessage};
 use crate::network::messaging;
 use crate::rpc_client::RpcClient;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -127,11 +126,8 @@ pub async fn handle_message(
     if let Some(handle) = stream_handle {
         let result = config.rpc.prompt_stream(&from_id, &content, &[], chunk_tx).await;
         match result {
-            Ok(pi_result) => {
+            Ok(_pi_result) => {
                 let _ = handle.await;
-                for file_path in &pi_result.files {
-                    send_file_to_user(&peers, &from_id, file_path, config).await;
-                }
             }
             Err(e) => {
                 let reply = format!("❌ pi 调用失败: {}", e);
@@ -145,9 +141,6 @@ pub async fn handle_message(
             Ok(pi_result) => {
                 if !pi_result.text.is_empty() {
                     send_to_peer(&peers, &from_id, &config.name, &pi_result.text, config, Some(msg.timestamp)).await;
-                }
-                for file_path in &pi_result.files {
-                    send_file_to_user(&peers, &from_id, file_path, config).await;
                 }
             }
             Err(e) => {
@@ -231,28 +224,3 @@ async fn send_to_peer_stream(
     }
 }
 
-/// 向用户发送文件
-async fn send_file_to_user(
-    peers: &PeerMap,
-    target_id: &str,
-    file_path: &PathBuf,
-    config: &BotConfig,
-) {
-    if !file_path.exists() {
-        return;
-    }
-
-    let addr = {
-        let map = peers.read().await;
-        map.get(target_id).map(|p| p.addr.clone())
-    };
-
-    if let Some(ref addr) = addr {
-        tracing::info!("[Router] 发送文件 {} 给 {}", file_path.display(), target_id);
-        if let Err(e) =
-            crate::network::file::send_file_to_peer(addr, &config.bot_id, file_path).await
-        {
-            tracing::error!("[Router] 发送文件失败: {}", e);
-        }
-    }
-}

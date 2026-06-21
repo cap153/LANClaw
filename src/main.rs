@@ -4,7 +4,6 @@ mod network;
 mod rpc_client;
 mod router;
 mod scheduler;
-mod skill_gen;
 
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
@@ -48,6 +47,15 @@ enum TaskCommand {
     /// 管理定时任务
     #[command(name = "task")]
     Task(TaskArgs),
+    /// 发送文件给用户
+    #[command(name = "send-file")]
+    SendFile {
+        /// 文件路径
+        path: String,
+        /// 目标用户 ID
+        #[arg(long)]
+        user_id: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -74,9 +82,6 @@ enum TaskAction {
         /// 到期执行命令（可多次指定）
         #[arg(long)]
         exec: Vec<String>,
-        /// 到期发送文件（可多次指定）
-        #[arg(long)]
-        file: Vec<String>,
     },
     /// 列出所有任务
     List,
@@ -113,7 +118,6 @@ async fn main() {
                     when,
                     reply,
                     exec,
-                    file,
                     user_id,
                     user_name,
                 } => {
@@ -124,11 +128,8 @@ async fn main() {
                     for cmd in &exec {
                         actions.push(models::TaskAction::Exec { command: cmd.clone() });
                     }
-                    for path in &file {
-                        actions.push(models::TaskAction::SendFile { path: path.clone() });
-                    }
                     if actions.is_empty() {
-                        eprintln!("❌ 请指定至少一个 --reply / --exec / --file");
+                        eprintln!("❌ 请指定至少一个 --reply 或 --exec");
                     } else {
                         match scheduler::add_task(
                             &when, &actions, &user_id, &user_name,
@@ -150,6 +151,47 @@ async fn main() {
                     Ok(output) => println!("{}", output),
                     Err(e) => eprintln!("❌ {}", e),
                 },
+            },
+            TaskCommand::SendFile { path, user_id } => {
+                // 兼容消息头中的 user_id:xxx 或 [user_id:xxx] 格式
+                let user_id = user_id
+                    .strip_prefix("[user_id:")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .or_else(|| user_id.strip_prefix("user_id:"))
+                    .unwrap_or(&user_id)
+                    .to_string();
+                // 读取 peers.json 查找目标地址
+                let peers_path = config::peers_path();
+                let content = match std::fs::read_to_string(&peers_path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        eprintln!("❌ 无法读取 peers 信息，请确认 LANClaw 正在运行");
+                        return;
+                    }
+                };
+                let peers_map: std::collections::HashMap<String, models::Peer> =
+                    serde_json::from_str(&content).unwrap_or_default();
+                let peer = match peers_map.get(&user_id) {
+                    Some(p) => p.clone(),
+                    None => {
+                        eprintln!("❌ 未找到用户 {}，用户可能不在线", &user_id.chars().take(8).collect::<String>());
+                        return;
+                    }
+                };
+                if peer.is_offline {
+                    eprintln!("❌ 用户不在线，无法发送文件");
+                    return;
+                }
+                let file_path = std::path::PathBuf::from(&path);
+                if !file_path.exists() {
+                    eprintln!("❌ 文件不存在: {}", path);
+                    return;
+                }
+                let my_id = config::bot_id();
+                match network::file::send_file_to_peer(&peer.addr, &my_id, &file_path).await {
+                    Ok(_) => println!("✅ 文件已发送: {}  →  {}", path, &user_id.chars().take(8).collect::<String>()),
+                    Err(e) => eprintln!("❌ 发送失败: {}", e),
+                }
             },
         }
         return;
@@ -179,13 +221,6 @@ async fn main() {
     println!("  Sessions:    {}", config::sessions_dir().display());
     println!("  Files:       {}", config::files_dir().display());
     println!();
-
-    // 生成技能文件
-    let _ = skill_gen::write_skill_file(&bot_name);
-    println!("[Skill] 技能文件已生成");
-
-    // 清理输出文件目录
-    let _ = rpc_client::clean_files_out();
 
     // 初始化 peer 列表
     let peers: models::PeerMap = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -226,7 +261,6 @@ async fn main() {
     let fp_bot_name = bot_name.clone();
     tokio::spawn(async move {
         use crate::models::StreamChunk;
-        use crate::network::file;
         use crate::network::messaging;
         use tokio::sync::mpsc;
 
@@ -279,14 +313,8 @@ async fn main() {
                 .await;
 
             match result {
-                Ok(pi_result) => {
+                Ok(_pi_result) => {
                     let _ = send_handle.await;
-                    // 发送 pi 生成的文件
-                    for f in &pi_result.files {
-                        if let Err(e) = file::send_file_to_peer(&addr, &fp_bot_id, f).await {
-                            tracing::error!("[FileAuto] 发送生成文件失败: {}", e);
-                        }
-                    }
                 }
                 Err(e) => {
                     let reply = format!("❌ 文件处理失败: {}", e);
@@ -375,11 +403,8 @@ async fn main() {
         });
     });
 
-    let scheduler_peers2 = peers.clone();
-    let scheduler_bot_id = bot_id.clone();
-    let scheduler_bot_name = bot_name.clone();
     tokio::spawn(async move {
-        scheduler::start_scheduler(send_fn, scheduler_peers2, scheduler_bot_id, scheduler_bot_name).await;
+        scheduler::start_scheduler(send_fn).await;
     });
 
     // ─── 主消息循环 ──────────────────────────────────────────────

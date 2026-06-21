@@ -108,16 +108,12 @@ pub fn files_dir() -> PathBuf {
     dir
 }
 
-pub fn files_out_dir() -> PathBuf {
-    let dir = data_dir().join("files_out");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+pub fn peers_path() -> PathBuf {
+    data_dir().join("peers.json")
 }
 
 pub fn tasks_path() -> PathBuf {
     data_dir().join("tasks.json")
 }
 
-pub fn skill_path() -> PathBuf {
-    data_dir().join("skill.md")
-}
+

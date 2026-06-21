@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, Mutex};
 
 // ─── JSONL 协议类型 ─────────────────────────────────────────────────────────
 
+// ─── JSONL 协议类型 ─────────────────────────────────────────────────────────
+
 #[derive(Debug)]
 enum RpcEvent {
     Response { success: bool, data: Option<Value>, error: Option<String> },
@@ -144,7 +146,6 @@ impl RpcClient {
     // ─── 构建启动参数 ─────────────────────────────────────────────────────
 
     fn build_rpc_command(model: &str, thinking: &str) -> (Command, String) {
-        let skill_path = config::skill_path();
         let session_dir = config::sessions_dir();
 
         let mut cmd = Command::new("pi");
@@ -160,15 +161,26 @@ impl RpcClient {
         ];
 
         // 注入身份认知到 system prompt
-        let identity = "你是一个 LANChat 聊天机器人。每条消息前有 [user_id:...]（仅供参考，回复中不要包含）。\
-            定时/提醒需求用 `lanclaw task add` 命令。";
+        let identity = concat!(
+            "你是一个 LANChat 聊天机器人。\n",
+            "每条消息前有 [user_id:...]（仅作参考，回复中不要包含）。\n",
+            "回复直接返回给用户。\n",
+            "\n",
+            "[定时任务] 用户说提醒/定时/每天/每周等意图时创建：\n",
+            "  lanclaw task add <时间> --reply \"文本\" --exec \"命令\" --user-id <用户ID>\n",
+            "  --reply/--exec 可组合，结果自动发给创建者。\n",
+            "  时间格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM,\n",
+            "    monthly:DD:HH:MM, monthly:last:HH:MM, yearly:MM-DD:HH:MM\n",
+            "  管理: lanclaw task list / cancel <ID> / logs <ID>\n",
+            "\n",
+            "[发送文件] 用户要求发送文件时：\n",
+            "  lanclaw send-file <文件路径> --user-id <用户ID>\n",
+            "\n",
+            "复杂重复任务（需判断分析的）用：\n",
+            "  lanclaw task add daily:09:00 --exec 'pi --print \"任务描述\"' --user-id <用户ID>\n",
+        );
         cmd.arg("--append-system-prompt").arg(identity);
         log_parts.push(format!("--append-system-prompt ({} bytes)", identity.len()));
-
-        if skill_path.exists() {
-            cmd.arg("--skill").arg(&skill_path);
-            log_parts.push(format!("--skill {}", skill_path.display()));
-        }
 
         if !model.is_empty() {
             cmd.arg("--model").arg(model);
@@ -255,8 +267,6 @@ impl RpcClient {
 
         let text = self.prompt_with_retry(&prompt_cmd, 2).await?;
 
-        let generated_files = scan_generated_files();
-
         if text.is_empty() {
             tracing::warn!("[RPC] 回复为空");
         } else {
@@ -272,7 +282,6 @@ impl RpcClient {
 
         Ok(PiResult {
             text,
-            files: generated_files,
         })
     }
 
@@ -469,7 +478,6 @@ impl RpcClient {
         self.send_and_wait(&prompt_cmd).await?;
         let text = self.wait_for_text(Some(chunk_tx)).await?;
 
-        let generated_files = scan_generated_files();
         let text = strip_user_id_tag(&text);
 
         if text.is_empty() {
@@ -478,7 +486,7 @@ impl RpcClient {
             tracing::info!("[RPC] 回复 ({} chars): {}", text.len(), text.chars().take(80).collect::<String>());
         }
 
-        Ok(PiResult { text, files: generated_files })
+        Ok(PiResult { text })
     }
 
     /// 等待 agent_end，同时收集 text_delta / thinking_delta / tool 事件
@@ -522,8 +530,9 @@ impl RpcClient {
                     }
                 }
                 RpcEvent::ToolCallEnd { tool_name, tool_args } => {
-                    // 重置 response 段——后续 text 作为新的独立段落
+                    // 重置 response 段和 thinking 段——后续 text/thinking 作为新的独立段落
                     response_buf.clear();
+                    thinking_buf.clear();
                     if let Some(ref tx) = chunk_tx {
                         let _ = tx
                             .send(StreamChunk::ToolCall {
@@ -708,29 +717,6 @@ fn base64_encode(data: &[u8]) -> String {
     String::from_utf8(result).unwrap_or_default()
 }
 
-fn scan_generated_files() -> Vec<PathBuf> {
-    let out_dir = config::files_out_dir();
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&out_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
-pub fn clean_files_out() -> std::io::Result<()> {
-    let out_dir = config::files_out_dir();
-    if out_dir.exists() {
-        std::fs::remove_dir_all(&out_dir)?;
-    }
-    std::fs::create_dir_all(&out_dir)
-}
-
-/// 去掉回复开头可能泄露的 [user_id:...] 标记
 fn strip_user_id_tag(text: &str) -> String {
     let text = text.trim();
     if let Some(rest) = text.strip_prefix("[user_id:") {

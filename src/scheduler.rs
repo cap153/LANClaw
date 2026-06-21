@@ -69,13 +69,6 @@ fn actions_summary(actions: &[TaskAction], max_chars: usize) -> String {
             TaskAction::Exec { command } => {
                 parts.push(format!("执行: {}", command.chars().take(40).collect::<String>()));
             }
-            TaskAction::SendFile { path } => {
-                let name = std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(path);
-                parts.push(format!("发文件: {}", name));
-            }
         }
     }
     let joined = parts.join(" | ");
@@ -131,6 +124,34 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
         }
         return Err("格式: daily:HH:MM".to_string());
     }
+    if let Some(rest) = when.strip_prefix("monthly:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() == 3 {
+            let day = if parts[0] == "last" { 0u32 } else { parts[0].parse().map_err(|_| "无效的日")? };
+            let h: u32 = parts[1].parse().map_err(|_| "无效的小时")?;
+            let m: u32 = parts[2].parse().map_err(|_| "无效的分钟")?;
+            if (day == 0 || (1..=31).contains(&day)) && h < 24 && m < 60 {
+                return Ok(TaskSchedule::Monthly { day, time: format!("{:02}:{:02}", h, m) });
+            }
+        }
+        return Err("格式: monthly:DD:HH:MM 或 monthly:last:HH:MM".to_string());
+    }
+    if let Some(rest) = when.strip_prefix("yearly:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() == 3 {
+            let date_parts: Vec<&str> = parts[0].split('-').collect();
+            if date_parts.len() == 2 {
+                let month: u32 = date_parts[0].parse().map_err(|_| "无效的月份")?;
+                let day: u32 = date_parts[1].parse().map_err(|_| "无效的日")?;
+                let h: u32 = parts[1].parse().map_err(|_| "无效的小时")?;
+                let m: u32 = parts[2].parse().map_err(|_| "无效的分钟")?;
+                if (1..=12).contains(&month) && (1..=31).contains(&day) && h < 24 && m < 60 {
+                    return Ok(TaskSchedule::Yearly { month, day, time: format!("{:02}:{:02}", h, m) });
+                }
+            }
+        }
+        return Err("格式: yearly:MM-DD:HH:MM".to_string());
+    }
     if let Some(rest) = when.strip_prefix("every:") {
         let secs = parse_duration(rest)?;
         if secs < 1 {
@@ -175,7 +196,7 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
         }
         return Ok(TaskSchedule::Once { execute_at });
     }
-    Err("无法解析时间，支持的格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM, 2026-06-15T09:00".to_string())
+    Err("无法解析时间，支持的格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM, monthly:DD:HH:MM, monthly:last:HH:MM, yearly:MM-DD:HH:MM, 2026-06-15T09:00".to_string())
 }
 
 /// 解析间隔时长
@@ -210,6 +231,14 @@ pub fn list_tasks() -> Result<String, String> {
             }
             TaskSchedule::Daily { time } => format!("每天 {}", time),
             TaskSchedule::Weekly { day, time } => format!("每周{} {}", day, time),
+            TaskSchedule::Monthly { day, time } => {
+                if *day == 0 {
+                    format!("每月末 {}", time)
+                } else {
+                    format!("每月 {} 日 {}", day, time)
+                }
+            }
+            TaskSchedule::Yearly { month, day, time } => format!("每年 {:02}-{:02} {}", month, day, time),
             TaskSchedule::Every { interval_secs } => {
                 if *interval_secs < 60 {
                     format!("每 {} 秒", interval_secs)
@@ -294,9 +323,6 @@ pub fn task_logs(task_id: &str) -> Result<String, String> {
 /// 启动调度器后台循环
 pub async fn start_scheduler(
     send_fn: Arc<dyn Fn(String, String) + Send + Sync + 'static>,
-    peers: crate::models::PeerMap,
-    bot_id: String,
-    bot_name: String,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
 
@@ -309,7 +335,7 @@ pub async fn start_scheduler(
         } else {
             interval.tick().await;
         }
-        if let Err(e) = tick(&send_fn, &peers, &bot_id, &bot_name).await {
+        if let Err(e) = tick(&send_fn).await {
             eprintln!("[Scheduler] tick 错误: {}", e);
         }
     }
@@ -317,9 +343,6 @@ pub async fn start_scheduler(
 
 async fn tick(
     send_fn: &Arc<dyn Fn(String, String) + Send + Sync + 'static>,
-    peers: &crate::models::PeerMap,
-    bot_id: &str,
-    _bot_name: &str,
 ) -> Result<(), String> {
     let now = Local::now().timestamp() as u64;
 
@@ -369,30 +392,6 @@ async fn tick(
                         Err(e) => {
                             output_parts.push(format!("命令执行失败: {}", e));
                         }
-                    }
-                }
-                TaskAction::SendFile { path } => {
-                    let file_path = std::path::PathBuf::from(path);
-                    let file_name = file_path.file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("file")
-                        .to_string();
-
-                    // 查找用户地址并发文件
-                    let addr = {
-                        let map = peers.read().await;
-                        map.get(&task_info.creator_id).map(|p| p.addr.clone())
-                    };
-
-                    match addr {
-                        Some(peer_addr) if file_path.exists() => {
-                            match crate::network::file::send_file_to_peer(&peer_addr, bot_id, &file_path).await {
-                                Ok(_) => output_parts.push(format!("📎 已发送文件: {}", file_name)),
-                                Err(e) => output_parts.push(format!("📎 发送文件失败: {}", e)),
-                            }
-                        }
-                        Some(_) => output_parts.push(format!("📎 文件不存在: {}", file_name)),
-                        None => output_parts.push("📎 用户不在线，无法发送文件".to_string()),
                     }
                 }
             }
