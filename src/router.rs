@@ -39,19 +39,34 @@ pub async fn handle_message(
 
     // ─── /new 命令 ──────────────────────────────────────────────────
     if content == "/new" {
+        // 先强制打断卡住的 RPC（不经过 rpc_mutex，直接杀子进程）
+        config.rpc.kill_child().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
         // 清空积累 + 取消运行中的 bash
         {
             let mut map = config.pending_bash.lock().await;
             map.remove(&from_id);
         }
         cancel_user_bash(config, &from_id).await;
-        match config.rpc.reset_session(&from_id).await {
+
+        // 子进程已被杀，先重启再重置 session
+        let cfg = crate::config::Config::load();
+        match config.rpc.restart(&cfg.model, &cfg.thinking).await {
             Ok(_) => {
-                let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
-                send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
+                match config.rpc.reset_session(&from_id).await {
+                    Ok(_) => {
+                        let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
+                        send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
+                    }
+                    Err(e) => {
+                        let reply = format!("❌ 重置失败: {}", e);
+                        send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+                    }
+                }
             }
             Err(e) => {
-                let reply = format!("❌ 重置失败: {}", e);
+                let reply = format!("❌ 重启 pi 失败: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
@@ -60,31 +75,46 @@ pub async fn handle_message(
 
     // ─── /model 命令 ───────────────────────────────────────────────
     if content == "/model" {
-        cancel_user_bash(config, &from_id).await;
-        // 获取当前模型信息
-        let current_model = config.rpc.get_current_model().await.ok().flatten();
-        let current_line = match &current_model {
-            Some(m) => {
-                let name = if !m.name.is_empty() { &m.name } else { &m.id };
-                format!("🟢 当前模型: {} ({})", name, m.provider)
-            }
-            None => "🟢 当前模型: pi 默认".to_string(),
-        };
+        // 先强制打断卡住的 RPC
+        config.rpc.kill_child().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        match config.rpc.get_available_models().await {
-            Ok(models) => {
-                if models.is_empty() {
-                    let reply = format!("{}\n\n⚠️ pi 配置中没有找到可用模型。请先在 pi 中配置至少一个模型。", current_line);
-                    send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
-                    return;
+        cancel_user_bash(config, &from_id).await;
+
+        // 子进程已被杀，先重启再查询模型
+        let cfg = crate::config::Config::load();
+        match config.rpc.restart(&cfg.model, &cfg.thinking).await {
+            Ok(_) => {
+                // 获取当前模型信息
+                let current_model = config.rpc.get_current_model().await.ok().flatten();
+                let current_line = match &current_model {
+                    Some(m) => {
+                        let name = if !m.name.is_empty() { &m.name } else { &m.id };
+                        format!("🟢 当前模型: {} ({})", name, m.provider)
+                    }
+                    None => "🟢 当前模型: pi 默认".to_string(),
+                };
+
+                match config.rpc.get_available_models().await {
+                    Ok(models) => {
+                        if models.is_empty() {
+                            let reply = format!("{}\n\n⚠️ pi 配置中没有找到可用模型。请先在 pi 中配置至少一个模型。", current_line);
+                            send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+                            return;
+                        }
+                        // 构建 [MODEL_LIST] 消息，第一行显示当前模型，第二行是 JSON 列表
+                        let list_json = serde_json::to_string(&models).unwrap_or_default();
+                        let reply = format!("[MODEL_LIST]\n{}\n{}", current_line, list_json);
+                        send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+                    }
+                    Err(e) => {
+                        let reply = format!("{}\n\n❌ 查询模型列表失败: {}", current_line, e);
+                        send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
+                    }
                 }
-                // 构建 [MODEL_LIST] 消息，第一行显示当前模型，第二行是 JSON 列表
-                let list_json = serde_json::to_string(&models).unwrap_or_default();
-                let reply = format!("[MODEL_LIST]\n{}\n{}", current_line, list_json);
-                send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
             Err(e) => {
-                let reply = format!("{}\n\n❌ 查询模型列表失败: {}", current_line, e);
+                let reply = format!("❌ 重启 pi 失败: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
@@ -93,6 +123,10 @@ pub async fn handle_message(
 
     // ─── /model select <provider> <modelId> ────────────────────────
     if content.starts_with("/model select ") {
+        // 先强制打断卡住的 RPC
+        config.rpc.kill_child().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
         cancel_user_bash(config, &from_id).await;
         // 检查是否正在切换
         if config.switching_model.load(Ordering::Acquire) {
@@ -117,7 +151,7 @@ pub async fn handle_message(
         let mut cfg = crate::config::Config::load();
         cfg.update_model(model_id);
 
-        // 重启 pi 子进程（杀掉旧进程，用新模型重新 spawn）
+        // 重启 pi 子进程
         let thinking = cfg.thinking.clone();
         match config.rpc.restart(model_id, &thinking).await {
             Ok(_) => {

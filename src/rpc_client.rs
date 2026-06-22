@@ -258,23 +258,23 @@ impl RpcClient {
             serde_json::json!({ "type": "prompt", "message": &tagged_message })
         };
 
-        // 3. 发送 prompt 并等 agent_end（空回复时自动重试 2 次）
+        // 3. 发送 prompt 并等 agent_end（空回复时自动重试 3 次）
         tracing::info!(
             "[RPC] >>> user={} msg={}",
             user_id.chars().take(8).collect::<String>(),
             serde_json::to_string(&prompt_cmd).unwrap_or_default()
         );
 
-        let text = self.prompt_with_retry(&prompt_cmd, 2).await?;
+        let text = self.prompt_with_retry(&prompt_cmd, 3).await?;
 
-        if text.is_empty() {
-            tracing::warn!("[RPC] 回复为空");
-        } else {
+        if !text.is_empty() {
             tracing::info!(
                 "[RPC] 回复 ({} chars): {}",
                 text.len(),
                 text.chars().take(80).collect::<String>()
             );
+        } else {
+            tracing::info!("[RPC] 回复仅有工具调用，文本为空");
         }
 
         // 去掉回复中可能泄露的 [user_id:...] 标记
@@ -372,6 +372,15 @@ impl RpcClient {
         Ok(())
     }
 
+    /// 强制终止 pi 子进程（不经过 rpc_mutex，用于打断卡住的 RPC）
+    /// 调用后需配合 restart() 重新拉起新进程
+    pub async fn kill_child(&self) {
+        let mut child_guard = self.child.lock().await;
+        let _ = child_guard.kill().await;
+        let _ = child_guard.wait().await;
+        tracing::warn!("[RPC] 子进程已强制终止");
+    }
+
     // ─── 内部：发送命令 + 等 response ────────────────────────────────────
 
     async fn send_and_wait(&self, cmd: &Value) -> Result<Value, String> {
@@ -403,7 +412,8 @@ impl RpcClient {
         }
     }
 
-    /// 发送 prompt 并等待回复，空回复时自动重试
+    /// 发送 prompt 并等待回复，空回复时自动重试（最多3次）
+    /// 如果回复中包含工具调用，即使文本为空也算成功
     async fn prompt_with_retry(&self, cmd: &Value, max_retries: u32) -> Result<String, String> {
         for attempt in 0..=max_retries {
             if attempt > 0 {
@@ -412,13 +422,13 @@ impl RpcClient {
             }
 
             self.send_and_wait(cmd).await?;
-            let text = self.wait_for_text(None).await?;
+            let (text, has_tool_calls) = self.wait_for_text(None).await?;
 
-            if !text.is_empty() {
+            if !text.is_empty() || has_tool_calls {
                 return Ok(text);
             }
         }
-        Ok(String::new())
+        Err("RPC 回复为空，请检查网络或模型配置".to_string())
     }
 
     /// 流式 prompt：通过 chunk_tx 逐段发送累积文本/思考/工具事件
@@ -474,27 +484,55 @@ impl RpcClient {
             serde_json::to_string(&prompt_cmd).unwrap_or_default()
         );
 
-        // 3. 发送 prompt，流式收集
-        self.send_and_wait(&prompt_cmd).await?;
-        let text = self.wait_for_text(Some(chunk_tx)).await?;
+        // 3. 发送 prompt，流式收集，空回复时自动重试（最多3次）
+        // 首次尝试流式输出给用户，重试时静默收集
+        let max_retries = 3u32;
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                tracing::warn!("[RPC] 空回复，第 {} 次重试...", attempt);
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                self.send_and_wait(&prompt_cmd).await?;
+            } else {
+                self.send_and_wait(&prompt_cmd).await?;
+            }
 
-        let text = strip_user_id_tag(&text);
+            // 仅在首次尝试时流式输出，重试时静默收集
+            let attempt_tx = if attempt == 0 { Some(chunk_tx.clone()) } else { None };
+            let (text, has_tool_calls) = self.wait_for_text(attempt_tx).await?;
+            let text = strip_user_id_tag(&text);
 
-        if text.is_empty() {
-            tracing::warn!("[RPC] 回复为空");
-        } else {
-            tracing::info!("[RPC] 回复 ({} chars): {}", text.len(), text.chars().take(80).collect::<String>());
+            if !text.is_empty() || has_tool_calls {
+                // 重试成功时（attempt > 0），文本是静默收集的，需要主动发送给用户
+                if attempt > 0 && !text.is_empty() {
+                    let _ = chunk_tx
+                        .send(StreamChunk::Text {
+                            content: text.clone(),
+                            is_thinking: false,
+                        })
+                        .await;
+                }
+                if !text.is_empty() {
+                    tracing::info!("[RPC] 回复 ({} chars): {}", text.len(), text.chars().take(80).collect::<String>());
+                } else {
+                    tracing::info!("[RPC] 回复仅有工具调用，文本为空");
+                }
+                return Ok(PiResult { text });
+            }
         }
 
-        Ok(PiResult { text })
+        // 所有重试均失败，返回错误（router 会发送错误消息给用户）
+        tracing::error!("[RPC] 所有重试均失败，回复为空");
+        Err("RPC 回复为空，请检查网络或模型配置".to_string())
     }
 
     /// 等待 agent_end，同时收集 text_delta / thinking_delta / tool 事件
     /// 如果传了 chunk_tx，每个 delta 后把累积文本发过去（流式）
-    async fn wait_for_text(&self, chunk_tx: Option<mpsc::Sender<StreamChunk>>) -> Result<String, String> {
+    /// 返回 (文本, 是否包含工具调用)
+    async fn wait_for_text(&self, chunk_tx: Option<mpsc::Sender<StreamChunk>>) -> Result<(String, bool), String> {
         let mut event_rx = self.event_rx.lock().await;
         let mut thinking_buf = String::new();
         let mut response_buf = String::new();
+        let mut has_tool_calls = false;
 
         loop {
             let event = event_rx
@@ -503,7 +541,7 @@ impl RpcClient {
                 .ok_or_else(|| "RPC 事件通道关闭".to_string())?;
 
             if event.is_agent_end() {
-                return Ok(response_buf);
+                return Ok((response_buf, has_tool_calls));
             }
 
             match event {
@@ -530,6 +568,7 @@ impl RpcClient {
                     }
                 }
                 RpcEvent::ToolCallEnd { tool_name, tool_args } => {
+                    has_tool_calls = true;
                     // 重置 response 段和 thinking 段——后续 text/thinking 作为新的独立段落
                     response_buf.clear();
                     thinking_buf.clear();
