@@ -1,6 +1,7 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -8,6 +9,8 @@ pub struct Config {
     pub model: String,
     pub thinking: String,
     pub port: u16,
+    /// 文件保存路径（可选），默认 ~/Downloads
+    pub files: Option<String>,
 }
 
 impl Default for Config {
@@ -17,6 +20,7 @@ impl Default for Config {
             model: String::new(),
             thinking: "off".to_string(),
             port: 8888,
+            files: None,
         }
     }
 }
@@ -102,10 +106,58 @@ pub fn sessions_dir() -> PathBuf {
     dir
 }
 
+/// 有效文件保存目录（OnceLock，启动时通过 init_files_dir 设置）
+static EFFECTIVE_FILES_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 启动时初始化文件保存目录（仅调用一次）
+/// 优先级：CLI 参数 > 配置文件 > 默认 ~/Downloads
+pub fn init_files_dir(cli_override: Option<&str>) -> PathBuf {
+    let cfg = Config::load();
+    let path = resolve_files_path(cli_override, cfg.files.as_deref());
+    let _ = std::fs::create_dir_all(&path);
+    let _ = EFFECTIVE_FILES_DIR.set(path.clone());
+    tracing::info!("[Config] 文件保存目录: {}", path.display());
+    path
+}
+
+fn resolve_files_path(cli: Option<&str>, config: Option<&str>) -> PathBuf {
+    // CLI 最高优先级
+    if let Some(p) = cli {
+        return expand_tilde(p);
+    }
+    // 配置文件次之
+    if let Some(p) = config {
+        return expand_tilde(p);
+    }
+    // 默认 ~/Downloads
+    default_files_dir()
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        if path == "~" {
+            return home;
+        }
+        if path.starts_with("~/") {
+            return PathBuf::from(path.replacen("~/", &format!("{}/", home.to_string_lossy()), 1));
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn default_files_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join("Downloads"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/lanclaw-files"))
+}
+
+/// 获取有效的文件保存目录
 pub fn files_dir() -> PathBuf {
-    let dir = data_dir().join("files");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    EFFECTIVE_FILES_DIR.get().cloned().unwrap_or_else(|| {
+        let path = default_files_dir();
+        let _ = std::fs::create_dir_all(&path);
+        path
+    })
 }
 
 pub fn peers_path() -> PathBuf {

@@ -39,6 +39,10 @@ struct Cli {
     #[arg(long, default_value_t = 8888)]
     port: u16,
 
+    /// 文件保存路径（默认 ~/Downloads）
+    #[arg(long)]
+    files: Option<String>,
+
     /// 子命令（供 pi 的 bash 工具调用）
     #[command(subcommand)]
     command: Option<TaskCommand>,
@@ -213,6 +217,9 @@ async fn main() {
     let bot_thinking = cli.thinking.clone();
     let port = cli.port;
 
+    // 初始化文件保存目录（CLI > 配置 > 默认 ~/Downloads）
+    let files_dir = config::init_files_dir(cli.files.as_deref());
+
     println!("  Bot Name:    {}", bot_name);
     println!("  Bot ID:      {}", &bot_id[..8]);
     println!("  Port:        {}", port);
@@ -221,7 +228,7 @@ async fn main() {
     println!();
     println!("  Data:        {}", config::data_dir().display());
     println!("  Sessions:    {}", config::sessions_dir().display());
-    println!("  Files:       {}", config::files_dir().display());
+    println!("  Files:       {}", files_dir.display());
     println!();
 
     // 初始化 peer 列表

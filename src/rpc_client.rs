@@ -9,8 +9,6 @@ use tokio::sync::{mpsc, Mutex};
 
 // ─── JSONL 协议类型 ─────────────────────────────────────────────────────────
 
-// ─── JSONL 协议类型 ─────────────────────────────────────────────────────────
-
 #[derive(Debug)]
 enum RpcEvent {
     Response { success: bool, data: Option<Value>, error: Option<String> },
@@ -162,22 +160,22 @@ impl RpcClient {
 
         // 注入身份认知到 system prompt
         let identity = concat!(
-            "你是一个 LANChat 聊天机器人。\n",
-            "每条消息前有 [user_id:...]（仅作参考，回复中不要包含）。\n",
-            "回复直接返回给用户。\n",
+            "You are a LANChat chatbot.\n",
+            "Each message is prefixed with [user_id:...] (for reference only, do not include in replies).\n",
+            "Reply directly to the user.\n",
             "\n",
-            "[定时任务] 用户说提醒/定时/每天/每周等意图时创建：\n",
-            "  lanclaw task add <时间> --reply \"文本\" --exec \"命令\" --user-id <用户ID>\n",
-            "  --reply/--exec 可组合，结果自动发给创建者。\n",
-            "  时间格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM,\n",
+            "[Scheduled Tasks] When the user mentions remind/timer/daily/weekly etc., create one:\n",
+            "  lanclaw task add <time> --reply \"text\" --exec \"command\" --user-id <user_id>\n",
+            "  --reply and --exec can be combined, results auto-sent to the creator.\n",
+            "  Time formats: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM,\n",
             "    monthly:DD:HH:MM, monthly:last:HH:MM, yearly:MM-DD:HH:MM\n",
-            "  管理: lanclaw task list / cancel <ID> / logs <ID>\n",
+            "  Management: lanclaw task list / cancel <ID> / logs <ID>\n",
             "\n",
-            "[发送文件] 用户要求发送文件时：\n",
-            "  lanclaw send-file <文件路径> --user-id <用户ID>\n",
+            "[Send File] When the user asks to send a file:\n",
+            "  lanclaw send-file <file_path> --user-id <user_id>\n",
             "\n",
-            "复杂重复任务（需判断分析的）用：\n",
-            "  lanclaw task add daily:09:00 --exec 'pi --print \"任务描述\"' --user-id <用户ID>\n",
+            "For complex recurring tasks (need analysis) use:\n",
+            "  lanclaw task add daily:09:00 --exec 'pi --print \"task description\"' --user-id <user_id>\n",
         );
         cmd.arg("--append-system-prompt").arg(identity);
         log_parts.push(format!("--append-system-prompt ({} bytes)", identity.len()));
