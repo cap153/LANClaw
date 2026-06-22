@@ -1,10 +1,12 @@
 use crate::models::{PeerMap, StreamChunk, TextMessage};
 use crate::network::messaging;
 use crate::rpc_client::RpcClient;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 pub struct BotConfig {
     pub name: String,
@@ -12,6 +14,10 @@ pub struct BotConfig {
     pub rpc: Arc<RpcClient>,
     /// 模型切换中标志（防止重复点击）
     pub switching_model: AtomicBool,
+    /// 用户 `!` 命令积累（user_id → 命令输出文本列表）
+    pub pending_bash: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// 当前运行中的 bash 取消令牌（user_id → token）
+    pub bash_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 /// 消息路由器
@@ -33,6 +39,12 @@ pub async fn handle_message(
 
     // ─── /new 命令 ──────────────────────────────────────────────────
     if content == "/new" {
+        // 清空积累 + 取消运行中的 bash
+        {
+            let mut map = config.pending_bash.lock().await;
+            map.remove(&from_id);
+        }
+        cancel_user_bash(config, &from_id).await;
         match config.rpc.reset_session(&from_id).await {
             Ok(_) => {
                 let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
@@ -48,6 +60,7 @@ pub async fn handle_message(
 
     // ─── /model 命令 ───────────────────────────────────────────────
     if content == "/model" {
+        cancel_user_bash(config, &from_id).await;
         // 获取当前模型信息
         let current_model = config.rpc.get_current_model().await.ok().flatten();
         let current_line = match &current_model {
@@ -80,6 +93,7 @@ pub async fn handle_message(
 
     // ─── /model select <provider> <modelId> ────────────────────────
     if content.starts_with("/model select ") {
+        cancel_user_bash(config, &from_id).await;
         // 检查是否正在切换
         if config.switching_model.load(Ordering::Acquire) {
             let reply = "⏳ 正在切换模型中，请稍候...";
@@ -119,12 +133,66 @@ pub async fn handle_message(
         return;
     }
 
+    // ─── ! / !! 命令执行 ──────────────────────────────────────────
+    if content.starts_with("!!") || content.starts_with("!") {
+        let is_silent = content.starts_with("!!");
+        let cmd = if is_silent {
+            content.trim_start_matches("!!").trim()
+        } else {
+            content.trim_start_matches("!").trim()
+        };
+
+        if cmd.is_empty() {
+            let reply = "⚠️ 请在 `!` 或 `!!` 后输入要执行的命令";
+            send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
+            return;
+        }
+
+        // 执行 bash
+        let token = {
+            let mut map = config.bash_tokens.lock().await;
+            // 取消旧的 bash
+            if let Some(old) = map.remove(&from_id) {
+                old.cancel();
+            }
+            let token = CancellationToken::new();
+            map.insert(from_id.clone(), token.clone());
+            token
+        };
+        let result = execute_bash(cmd, token).await;
+
+        // 构建 tool_result JSON segments（复用 LANChat tool_result 渲染）
+        let segments_json = format_tool_result(cmd, &result.output, result.is_error);
+        send_to_peer(&peers, &from_id, &config.name, &segments_json, config, Some(msg.timestamp + 1)).await;
+
+        // 积累 ! 命令（!! 不积累）
+        if !is_silent {
+            let mut map = config.pending_bash.lock().await;
+            map.entry(from_id.clone()).or_default().push(result.context_line);
+        }
+        return;
+    }
+
     // ─── 普通文本 → 流式回复 ────────────────────────────────────
+    // 取消运行中的 bash 后处理
+    cancel_user_bash(config, &from_id).await;
+    // 检查是否有积累的 ! 命令
+    let final_content = {
+        let mut map = config.pending_bash.lock().await;
+        match map.remove(&from_id) {
+            Some(cmds) if !cmds.is_empty() => {
+                let prefix = cmds.join("\n---\n");
+                format!("{}\n\n{}", prefix, content)
+            }
+            _ => content.clone(),
+        }
+    };
+
     let (chunk_tx, chunk_rx) = mpsc::channel::<StreamChunk>(8);
     let stream_handle = send_to_peer_stream(&peers, &from_id, &config.name, chunk_rx, config.bot_id.clone(), msg.timestamp).await;
 
     if let Some(handle) = stream_handle {
-        let result = config.rpc.prompt_stream(&from_id, &content, &[], chunk_tx).await;
+        let result = config.rpc.prompt_stream(&from_id, &final_content, &[], chunk_tx).await;
         match result {
             Ok(_pi_result) => {
                 let _ = handle.await;
@@ -136,7 +204,7 @@ pub async fn handle_message(
         }
     } else {
         // WS 连不上，回退到非流式
-        let result = config.rpc.prompt(&from_id, &content, &[]).await;
+        let result = config.rpc.prompt(&from_id, &final_content, &[]).await;
         match result {
             Ok(pi_result) => {
                 if !pi_result.text.is_empty() {
@@ -222,5 +290,133 @@ async fn send_to_peer_stream(
             None
         }
     }
+}
+
+// ─── ! / !! 命令辅助函数 ────────────────────────────────────────────
+
+struct BashResult {
+    output: String,
+    is_error: bool,
+    /// 包含 "$ command\noutput" 格式的上下文文本
+    context_line: String,
+}
+
+/// 执行 bash 命令，返回输出和是否失败
+async fn execute_bash(command: &str, cancel: CancellationToken) -> BashResult {
+    let mut child = match tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let line = format!("命令启动失败: {}", e);
+            return BashResult {
+                output: line.clone(),
+                is_error: true,
+                context_line: format!("$ {}\n{}", command, line),
+            };
+        }
+    };
+
+    // 先取走管道句柄，等待结束后再读取
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+
+    // 等待进程结束或被取消
+    let exit_status: Option<std::process::ExitStatus> = {
+        let cancel = cancel.clone();
+        tokio::select! {
+            result = child.wait() => {
+                result.ok()
+            }
+            _ = cancel.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                None
+            }
+        }
+    };
+
+    // 读取输出
+    let mut combined = String::new();
+    if let Some(ref mut out) = child_stdout {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf).await;
+        if !buf.is_empty() {
+            combined.push_str(&String::from_utf8_lossy(&buf));
+        }
+    }
+    if let Some(ref mut err) = child_stderr {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf).await;
+        if !buf.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&String::from_utf8_lossy(&buf));
+        }
+    }
+
+    match exit_status {
+        None => {
+            let truncated = truncate_output(&combined);
+            let msg = format!("命令被取消。此前输出（{} 字节）：\n{}\n", combined.len(), truncated);
+            BashResult {
+                output: msg.clone(),
+                is_error: true,
+                context_line: format!("$ {}\n{}", command, combined),
+            }
+        }
+        Some(status) => {
+            let is_error = !status.success();
+            let display_output = truncate_output(&combined);
+            let context_line = format!("$ {}\n{}", command, combined);
+            BashResult {
+                output: display_output,
+                is_error,
+                context_line,
+            }
+        }
+    }
+}
+
+/// 截断大输出（10KB）
+fn truncate_output(output: &str) -> String {
+    const MAX_LEN: usize = 10 * 1024;
+    if output.len() > MAX_LEN {
+        format!(
+            "{}...\n(output truncated, {} bytes total)",
+            &output[..MAX_LEN],
+            output.len()
+        )
+    } else {
+        output.to_string()
+    }
+}
+
+/// 取消用户的运行中 bash
+async fn cancel_user_bash(config: &BotConfig, user_id: &str) {
+    let mut map = config.bash_tokens.lock().await;
+    if let Some(token) = map.remove(user_id) {
+        token.cancel();
+    }
+}
+
+/// 将命令输出格式化为 segments JSON（复用 LANChat tool_result 渲染）
+fn format_tool_result(command: &str, output: &str, is_error: bool) -> String {
+    let segments = serde_json::json!({
+        "v": 2,
+        "segments": [{
+            "type": "tool_result",
+            "output": format!("$ {}\n{}", command, output),
+            "is_error": is_error,
+        }]
+    });
+    segments.to_string()
 }
 

@@ -13,9 +13,11 @@ use axum::Router;
 use clap::Parser;
 use network::file::AppState;
 use network::messaging;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// LANClaw — LANChat 智能机器人（Pi 驱动）
 #[derive(Parser, Debug)]
@@ -252,6 +254,8 @@ async fn main() {
         bot_id: bot_id.clone(),
         rpc: rpc_client.clone(),
         switching_model: AtomicBool::new(false),
+        pending_bash: Arc::new(Mutex::new(HashMap::new())),
+        bash_tokens: Arc::new(Mutex::new(HashMap::new())),
     });
 
     // ─── 启动文件自动处理（上传完成 → pi） ──────────────────────
