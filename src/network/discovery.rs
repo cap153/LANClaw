@@ -58,12 +58,12 @@ pub async fn start_announcing(port: u16, bot_id: String, bot_name: String) {
     println!("[UDP] 开始广播心跳...");
 
     loop {
-        // 简单估算可用内存（仅 Linux）
-        let mem_hint = 1024u64;
+        // 读取系统可用内存（MB）
+        let mem_available_mb = get_available_memory_mb();
 
         let msg = format!(
             "LANChat|ONLINE|{}|{}|{}|{}",
-            bot_id, bot_name, port, mem_hint
+            bot_id, bot_name, port, mem_available_mb
         );
 
         for addr in &target_addrs {
@@ -119,12 +119,15 @@ pub async fn start_listening(
 
                     let mut map = peers.write().await;
 
+                    let available_memory = parts.get(5).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
                     let entry = map.entry(peer_id.clone()).or_insert_with(|| Peer {
                         id: peer_id.clone(),
                         name: name.clone(),
                         addr: peer_addr.clone(),
                         last_seen: now,
                         is_offline: false,
+                        available_memory_mb: available_memory,
                     });
 
                     let was_offline = entry.is_offline;
@@ -133,6 +136,7 @@ pub async fn start_listening(
                     entry.addr = peer_addr;
                     entry.last_seen = now;
                     entry.is_offline = false;
+                    entry.available_memory_mb = available_memory;
 
                     // 持久化 peer 信息（供 send-file CLI 使用）
                     let peers_snapshot = map.clone();
@@ -169,4 +173,19 @@ pub async fn start_listening(
             }
         }
     }
+}
+
+/// 获取系统可用内存（MB）。非 Linux 返回 1024 默认值。
+fn get_available_memory_mb() -> u64 {
+    #[cfg(target_os = "linux")]
+    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                if let Ok(kb) = rest.trim().trim_end_matches(" kB").parse::<u64>() {
+                    return kb / 1024;
+                }
+            }
+        }
+    }
+    1024
 }

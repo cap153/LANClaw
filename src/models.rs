@@ -34,6 +34,8 @@ pub struct Peer {
     pub last_seen: u64,
     #[serde(default)]
     pub is_offline: bool,
+    #[serde(default)]
+    pub available_memory_mb: u64,
 }
 
 pub type PeerMap = Arc<RwLock<HashMap<String, Peer>>>;

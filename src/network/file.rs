@@ -1,8 +1,12 @@
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router};
+use futures_util::SinkExt;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use crate::config;
 use crate::models::FileCompleteEvent;
@@ -21,7 +25,20 @@ pub struct AppState {
 pub fn file_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/upload", axum::routing::post(upload_handler))
+        .route_layer(DefaultBodyLimit::disable())
         .route("/api/download/{file_id}", axum::routing::get(download_handler))
+}
+
+/// 分块上传中的临时文件索引（sender_id → .downloading 路径）
+static PENDING_CHUNKS: OnceLock<Mutex<HashMap<String, PendingChunkFile>>> = OnceLock::new();
+
+struct PendingChunkFile {
+    /// 完整后的最终文件名
+    final_name: String,
+}
+
+fn pending_chunks() -> &'static Mutex<HashMap<String, PendingChunkFile>> {
+    PENDING_CHUNKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 上传文件处理（兼容 LANChat 分块协议）
@@ -36,130 +53,120 @@ async fn upload_handler(
     let mut chunk_data: Option<Vec<u8>> = None;
     let mut sender_id = String::new();
 
-    while let Some(mut field) = multipart.next_field().await.ok().flatten() {
-        let field_name = field.name().map(|s| s.to_string()).unwrap_or_default();
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("[File] 解析 multipart 失败: {}", e);
+                return (StatusCode::BAD_REQUEST, format!("multipart 解析错误: {}", e)).into_response();
+            }
+        };
+        let field_name = match field.name() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
         match field_name.as_str() {
-            "peer_id" => sender_id = field.text().await.unwrap_or_default(),
-            "file_name" => file_name = field.text().await.unwrap_or_default(),
+            "peer_id" => {
+                sender_id = field.text().await.unwrap_or_default();
+            }
+            "file_name" => {
+                file_name = field.text().await.unwrap_or_default();
+            }
             "file_size" => {
-                file_size = field.text().await.unwrap_or_default().parse().unwrap_or(0)
+                file_size = field.text().await.unwrap_or_default().parse().unwrap_or(0);
             }
             "chunk_index" => {
-                chunk_index = field.text().await.unwrap_or_default().parse().unwrap_or(0)
+                chunk_index = field.text().await.unwrap_or_default().parse().unwrap_or(0);
             }
             "chunk_total" => {
-                chunk_total = field.text().await.unwrap_or_default().parse().unwrap_or(0)
+                chunk_total = field.text().await.unwrap_or_default().parse().unwrap_or(0);
             }
             "chunk" => {
                 let mut data = Vec::new();
-                while let Ok(Some(chunk)) = field.chunk().await {
-                    data.extend_from_slice(&chunk);
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => data.extend_from_slice(&chunk),
+                        Ok(None) => break,
+                        Err(e) => {
+                            eprintln!("[File] 读取分块数据失败: {}", e);
+                            return (StatusCode::INTERNAL_SERVER_ERROR, format!("读取分块失败: {}", e)).into_response();
+                        }
+                    }
                 }
                 chunk_data = Some(data);
             }
-            _ => {}
+            _ => {
+                // 消耗未识别字段的数据以推进 multipart 流
+                while let Ok(Some(_)) = field.chunk().await {}
+            }
         }
     }
 
-    if chunk_data.is_none() {
-        return (StatusCode::BAD_REQUEST, "缺少 chunk 数据").into_response();
-    }
+    let chunk_data = match chunk_data {
+        Some(d) => d,
+        None => return (StatusCode::BAD_REQUEST, "缺少 chunk 数据").into_response(),
+    };
 
-    let chunk_data = chunk_data.unwrap();
+    if chunk_total <= 1 && file_size > 0 && (chunk_data.len() as u64) < file_size {
+        tracing::warn!(
+            "[File] 分块数据不完整: 收到 {} 字节, 期望 {} 字节 (单分块传输)",
+            chunk_data.len(), file_size
+        );
+        // 不返回错误，继续写入已收到的部分
+    }
     let files_dir = config::files_dir();
 
-    // ── 第一块：智能命名协商（含秒传/重命名） ───────────────────────────
-    let final_name: String;
-
+    // ── 第一块：秒传检查 + 确定写入路径 ──
     if chunk_index == 0 {
-        // 拆分主文件名和扩展名
-        let (stem, ext) = {
-            let p = std::path::Path::new(&file_name);
-            let s = p
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&file_name)
-                .to_string();
-            let e = p
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|e| format!(".{}", e))
-                .unwrap_or_default();
-            (s, e)
-        };
-
         let candidate = files_dir.join(&file_name);
         let downloading_path = files_dir.join(format!("{}.downloading", file_name));
 
         if candidate.exists() && !downloading_path.exists() {
-            // 目标文件完整，比较大小
-            let existing_size = tokio::fs::metadata(&candidate)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0);
-
-            if existing_size == file_size && file_size > 0 {
-                // 大小完全相同 → 秒传
-                tracing::info!(
-                    "[File] ✓ 秒传命中: {:?} (大小相同: {} 字节)",
-                    candidate, file_size
-                );
-                // 通知发送端停止，同时触发文件处理事件（引用已有文件）
-                let _ = state.file_complete_tx.send(FileCompleteEvent {
-                    sender_id: sender_id.clone(),
-                    file_path: candidate.clone(),
-                    file_name: file_name.clone(),
-                });
-                return Json(serde_json::json!({
-                    "status": "already_exists",
-                    "file_name": file_name,
-                    "file_size": file_size,
-                    "message": "文件已存在且完整，秒传成功",
-                }))
-                .into_response();
-            } else {
-                // 大小不同 → 冲突，需要重命名
-                tracing::info!(
-                    "[File] 同名文件大小不同 (已有: {}, 新: {})，触发重命名",
-                    existing_size, file_size
-                );
-            }
-        }
-
-        // 找一个不冲突的文件名（原名冲突或 .downloading 残留）
-        let mut resolved_name = file_name.clone();
-        if candidate.exists() || downloading_path.exists() {
-            let mut i = 1usize;
-            loop {
-                let candidate_name = format!("{}({}){}", stem, i, ext);
-                let cp = files_dir.join(&candidate_name);
-                let dp = files_dir.join(format!("{}.downloading", candidate_name));
-                if !cp.exists() && !dp.exists() {
-                    resolved_name = candidate_name;
-                    tracing::info!("[File] 重命名为: {}", resolved_name);
-                    break;
-                }
-                i += 1;
-                if i > 9999 {
-                    resolved_name =
-                        format!("{}_{}{}", stem, chrono::Utc::now().timestamp(), ext);
-                    break;
+            if let Ok(existing_size) = tokio::fs::metadata(&candidate).await.map(|m| m.len()) {
+                if existing_size == file_size && file_size > 0 {
+                    tracing::info!(
+                        "[File] ✓ 秒传命中: {:?} (大小相同: {} 字节)",
+                        candidate, file_size
+                    );
+                    let _ = state.file_complete_tx.send(FileCompleteEvent {
+                        sender_id: sender_id.clone(),
+                        file_path: candidate.clone(),
+                        file_name: file_name.clone(),
+                    });
+                    return Json(serde_json::json!({
+                        "status": "already_exists",
+                        "file_name": file_name,
+                        "file_size": file_size,
+                        "message": "文件已存在且完整，秒传成功",
+                    }))
+                    .into_response();
                 }
             }
         }
 
-        final_name = resolved_name;
-    } else {
-        final_name = file_name.clone();
+        // 始终用原始 file_name 作为写入目标（多分块写入同一文件）
+        let pending_path = files_dir.join(format!("{}.downloading", file_name));
+        let _ = tokio::fs::remove_file(&pending_path).await;
+        pending_chunks().lock().unwrap().insert(
+            sender_id.clone(),
+            PendingChunkFile {
+                final_name: file_name.clone(),
+            },
+        );
     }
+
+    // ── 查询当前传输的最终文件名 ──
+    let final_name = {
+        let map = pending_chunks().lock().unwrap();
+        match map.get(&sender_id) {
+            Some(info) => info.final_name.clone(),
+            None => file_name.clone(),
+        }
+    };
 
     let temp_path = files_dir.join(format!("{}.downloading", final_name));
     let final_path = files_dir.join(&final_name);
-
-    // 第一块时清理旧临时文件
-    if chunk_index == 0 {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-    }
 
     // 追加写入
     let file = match tokio::fs::OpenOptions::new()
@@ -193,7 +200,34 @@ async fn upload_handler(
         .unwrap_or(0);
 
     if temp_size >= file_size && file_size > 0 {
-        match tokio::fs::rename(&temp_path, &final_path).await {
+        // 清理 pending 记录
+        pending_chunks().lock().unwrap().remove(&sender_id);
+
+        // 若最终文件已存在，重命名避让
+        let target_path = if final_path.exists() {
+            let (stem, ext) = split_file_stem_ext(&final_name);
+            let mut i = 1usize;
+            loop {
+                let renamed = format!("{}({}){}", stem, i, ext);
+                let p = files_dir.join(&renamed);
+                if !p.exists() {
+                    tracing::info!("[File] 目标已存在，重命名为: {}", renamed);
+                    break p;
+                }
+                i += 1;
+                if i > 9999 {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    break files_dir.join(format!("{}_{}{}", stem, ts, ext));
+                }
+            }
+        } else {
+            final_path.clone()
+        };
+
+        match tokio::fs::rename(&temp_path, &target_path).await {
             Ok(_) => {
                 let size_str = if file_size >= 1024 * 1024 {
                     format!("{:.1} MB", file_size as f64 / 1048576.0)
@@ -203,16 +237,15 @@ async fn upload_handler(
                     format!("{} B", file_size)
                 };
                 tracing::info!(
-                    "[File] 文件接收完成: {} ({}) 来自 {}",
-                    final_name,
+                    "[File] ✓ 文件接收完成: {} ({}) 来自 {}",
+                    target_path.file_name().and_then(|s| s.to_str()).unwrap_or(&final_name),
                     size_str,
                     sender_id
                 );
-                // 自动触发 pi 处理
                 let _ = state.file_complete_tx.send(FileCompleteEvent {
                     sender_id: sender_id.clone(),
-                    file_path: final_path.clone(),
-                    file_name: final_name.clone(),
+                    file_path: target_path.clone(),
+                    file_name: target_path.file_name().and_then(|s| s.to_str()).unwrap_or(&final_name).to_string(),
                 });
             }
             Err(e) => {
@@ -229,6 +262,21 @@ async fn upload_handler(
         "chunk_total": chunk_total,
     }))
     .into_response()
+}
+
+fn split_file_stem_ext(name: &str) -> (String, String) {
+    let p = std::path::Path::new(name);
+    let s = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string();
+    let e = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{}", e))
+        .unwrap_or_default();
+    (s, e)
 }
 
 /// 文件下载
@@ -263,7 +311,8 @@ async fn download_handler(Path(file_id): Path<String>) -> impl IntoResponse {
 // ─── 向 LANChat/LANClaw 用户发送文件 ───────────────────────────────────────
 
 /// 根据文件大小和设备内存计算最优分块大小（零拷贝友好）
-fn calculate_optimal_chunk_size(file_size: u64) -> u64 {
+/// `receiver_memory_mb` = 接收方可用内存（MB），0 表示未知
+fn calculate_optimal_chunk_size(file_size: u64, receiver_memory_mb: u64) -> u64 {
     // 基础分块策略（匹配 LANChat web 端的 baseChunkSize 逻辑）
     let base_size = if file_size < 100 * 1024 * 1024 {
         100 * 1024 * 1024
@@ -277,27 +326,38 @@ fn calculate_optimal_chunk_size(file_size: u64) -> u64 {
         500 * 1024 * 1024
     };
 
-    // 尝试读取系统可用内存（Linux）作为上限
+    // 根据发送方可用内存限制（Linux 读取 /proc/meminfo）
+    let mut sender_limit = u64::MAX;
     #[cfg(target_os = "linux")]
     if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("MemAvailable:") {
                 if let Ok(kb) = rest.trim().trim_end_matches(" kB").parse::<u64>() {
-                    let max_chunk = (kb * 1024) * 80 / 100; // 可用内存的 80%
-                    return base_size.min(max_chunk);
+                    sender_limit = (kb * 1024) * 80 / 100; // 可用内存的 80%
+                    break;
                 }
             }
         }
-    }
+    };
 
-    base_size
+    // 根据接收方可用内存限制（LANChat 同款公式）
+    let receiver_limit = if receiver_memory_mb > 0 {
+        std::cmp::max(50 * 1024 * 1024, receiver_memory_mb as u64 * 1024 * 1024 / 4)
+    } else {
+        u64::MAX
+    };
+
+    base_size.min(sender_limit).min(receiver_limit)
 }
 
 /// 向目标用户发送文件（通过接收端的 upload API）
 pub async fn send_file_to_peer(
     peer_addr: &str,
     my_id: &str,
+    user_name: &str,
     file_path: &std::path::Path,
+    sender_msg_id: i64,
+    receiver_memory_mb: u64,
 ) -> Result<(), String> {
     let file_name = file_path
         .file_name()
@@ -308,21 +368,38 @@ pub async fn send_file_to_peer(
         .map_err(|e| format!("读取文件属性失败: {}", e))?
         .len();
 
+    // ── 发送 file_offer 通知，让接收端创建消息记录 ──
+    let offer = serde_json::json!({
+        "msg_type": "file_offer",
+        "from_id": my_id,
+        "from_name": user_name,
+        "file_name": file_name,
+        "file_size": file_size,
+        "sender_msg_id": sender_msg_id,
+    });
+    let ws_url = format!("ws://{}/ws", peer_addr);
+    if let Ok((mut ws_stream, _)) = tokio_tungstenite::connect_async(&ws_url).await {
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        let _ = ws_stream.send(WsMessage::Text(offer.to_string())).await;
+        let _ = ws_stream.close(None).await;
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
     let upload_url = format!("http://{}/api/upload", peer_addr);
-    let chunk_size = calculate_optimal_chunk_size(file_size);
+    let chunk_size = calculate_optimal_chunk_size(file_size, receiver_memory_mb);
     let total_chunks = (file_size + chunk_size - 1) / chunk_size;
 
     tracing::info!(
-        "[File] 发送 {} ({} 字节)，分块大小 {} MB，共 {} 块",
+        "[File] 发送 {} ({} 字节)，分块大小 {} MB，共 {} 块 (接收方内存: {} MB)",
         file_name,
         file_size,
         chunk_size / (1024 * 1024),
         total_chunks,
+        receiver_memory_mb,
     );
 
     // 打开文件句柄（后续每块用 try_clone 获取独立句柄做零拷贝流式读取）
@@ -330,9 +407,24 @@ pub async fn send_file_to_peer(
         .await
         .map_err(|e| format!("打开文件失败: {}", e))?;
 
+    let start_time = std::time::Instant::now();
+    let mut total_sent: u64 = 0;
+
     for chunk_index in 0..total_chunks {
         let offset = chunk_index * chunk_size;
         let this_chunk_size = chunk_size.min(file_size - offset);
+
+        // 计算速度（LANChat web 端同款公式：offset / (1024*1024) / elapsed）
+        let speed_mb_s = if chunk_index > 0 {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                (total_sent as f64 / (1024.0 * 1024.0)) / elapsed
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
 
         // 为该块创建独立文件句柄并 seek 到对应偏移（零拷贝：ReaderStream 直接从内核读取）
         let mut chunk_handle = src_file
@@ -355,6 +447,8 @@ pub async fn send_file_to_peer(
             .text("file_size", file_size.to_string())
             .text("chunk_index", chunk_index.to_string())
             .text("chunk_total", total_chunks.to_string())
+            .text("sender_msg_id", sender_msg_id.to_string())
+            .text("speed_mb_s", format!("{:.1}", speed_mb_s))
             .part(
                 "chunk",
                 reqwest::multipart::Part::stream_with_length(body, this_chunk_size)
@@ -372,6 +466,8 @@ pub async fn send_file_to_peer(
         if !resp.status().is_success() {
             return Err(format!("HTTP {} (分块 {})", resp.status(), chunk_index + 1));
         }
+
+        total_sent += this_chunk_size;
 
         // 第一块后检查秒传命中
         if chunk_index == 0 {
@@ -391,15 +487,32 @@ pub async fn send_file_to_peer(
         }
 
         if (chunk_index + 1) % 5 == 0 || chunk_index + 1 == total_chunks {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let avg_speed = if elapsed > 0.0 {
+                (total_sent as f64 / (1024.0 * 1024.0)) / elapsed
+            } else {
+                0.0
+            };
             tracing::info!(
-                "[File] 发送 {}: {}/{} 块",
+                "[File] 发送 {}: {}/{} 块 ({:.1} MB/s)",
                 file_name,
                 chunk_index + 1,
-                total_chunks
+                total_chunks,
+                avg_speed,
             );
         }
     }
 
-    tracing::info!("[File] 文件发送完成: {}", file_name);
+    let total_elapsed = start_time.elapsed().as_secs_f64();
+    let avg_speed = if total_elapsed > 0.0 {
+        (file_size as f64 / (1024.0 * 1024.0)) / total_elapsed
+    } else {
+        0.0
+    };
+    tracing::info!(
+        "[File] ✓ 文件发送完成: {} ({:.1} MB/s)",
+        file_name,
+        avg_speed,
+    );
     Ok(())
 }

@@ -254,8 +254,21 @@ pub async fn handle_ws_connection(
                     serde_json::from_str::<HandshakeMessage>(&text)
                 {
                     tracing::debug!("[WS] 收到握手消息 (忽略)");
+                } else if let Some(msg_type) =
+                    serde_json::from_str::<serde_json::Value>(&text).ok()
+                        .and_then(|v| v.get("msg_type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                {
+                    match msg_type.as_str() {
+                        "file_offer" | "file_request" | "file_accept" | "file_not_found"
+                        | "file_status_update" | "file_download_progress" | "start_upload" => {
+                            tracing::trace!("[WS] 收到文件协议消息 (忽略): {}", msg_type);
+                        }
+                        _ => {
+                            tracing::debug!("[WS] 未知消息类型: {}", msg_type);
+                        }
+                    }
                 } else {
-                    tracing::warn!("[WS] 无法解析的消息: {}", text.chars().take(100).collect::<String>());
+                    tracing::debug!("[WS] 无法解析的消息: {}", text.chars().take(100).collect::<String>());
                 }
             }
             Ok(Message::Close(_)) => {

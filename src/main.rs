@@ -194,7 +194,13 @@ async fn main() {
                     return;
                 }
                 let my_id = config::bot_id();
-                match network::file::send_file_to_peer(&peer.addr, &my_id, &file_path).await {
+                let sender_msg_id = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64;
+                match network::file::send_file_to_peer(
+                    &peer.addr, &my_id, &peer.name, &file_path, sender_msg_id, peer.available_memory_mb,
+                ).await {
                     Ok(_) => println!("✅ 文件已发送: {}  →  {}", path, &user_id.chars().take(8).collect::<String>()),
                     Err(e) => eprintln!("❌ 发送失败: {}", e),
                 }
