@@ -24,7 +24,7 @@ LANClaw 以 LANChat 网络中的对等节点身份运行，接收在线用户的
 ### 前置条件
 
 - 已安装并配置好 [Pi](https://pi.dev)（API key / 登录）
-- 局域网中有使用 LANChat 的用户
+- 局域网中有使用 [LANChat](https://github.com/cap153/LANChat) 的用户
 
 ### 运行
 
@@ -43,60 +43,6 @@ lanclaw --port 8889
 
 # 自定义文件保存路径
 lanclaw --files ~/Downloads/lanclaw
-```
-
-### 配置
-
-复制 `config.example.json` 到 `~/.config/lanclaw/config.json`：
-
-```json
-{
-  "name": "PiBot",
-  "model": "",
-  "thinking": "off",
-  "port": 8888,
-  "files": null
-}
-```
-
-| 字段 | 说明 |
-|------|------|
-| `name` | 机器人在 LANChat 上的显示名称 |
-| `model` | Pi 模型（空字符串 = 使用 Pi 默认模型） |
-| `thinking` | Pi 思考级别: off, minimal, low, medium, high, xhigh |
-| `port` | 监听端口（与 LANChat 协议使用相同端口） |
-| `files` | 文件保存路径（`null` = 默认 `~/Downloads`） |
-| `data` | 数据目录（`null` = 默认 `~/.local/share/lanclaw`） |
-
-命令行参数会覆盖配置文件中的对应设置。优先级：`--data` CLI > `data` 配置 > `~/.local/share/lanclaw`。
-
-## 工作原理
-
-```
-┌─────────┐  LANChat 协议       ┌──────────┐  pi --mode rpc   ┌──────┐
-│ LANChat  │ ◄─── UDP/TCP/WS ──► │ LANClaw  │ ─────────────────► │  Pi  │
-│  用户    │ ◄─── HTTP 文件 ──── │  (Rust)  │ ◄──────────────── │      │
-└─────────┘                      └──────────┘                  └──────┘
-```
-
-1. **UDP 发现** — LANClaw 像 LANChat 一样广播心跳，用户能看到机器人上线
-2. **心跳回复** — 收到其他设备的心跳时立即回复一条，不同端口/网段的设备无需手动配置即可自动发现
-3. **消息接收** — LANChat 用户通过 WebSocket/TCP 向 LANClaw 端口发送消息
-4. **AI 处理** — LANClaw 通过 JSONL RPC 协议（`pi --mode rpc`）向 Pi 发送 prompt，支持流式文本、思考过程、工具调用和工具结果
-5. **回复** — Pi 的文本回复流式返回给用户；Pi 生成的文件通过 HTTP 自动发送
-6. **文件处理** — 用户发送的文件保存到 `~/Downloads`（可配置）后传给 Pi 分析
-7. **卡住恢复** — 如果 RPC 因网络问题卡住，发送 `/new` 或 `/model` 命令可强制杀 pi 子进程并立即重启
-
-## 数据存储
-
-```
-~/.local/share/lanclaw/
-├── sessions/          # Pi session 文件（每个用户一个 .jsonl）
-├── tasks.json         # 定时任务存储
-├── skill.md           # 动态生成的 Pi 技能文件
-└── bot_id.txt         # 机器人持久化 UUID
-
-~/Downloads/           # 用户上传的文件（可配置）
 ```
 
 ## 用户使用指南
@@ -166,7 +112,61 @@ lanclaw --port 8889
 不同机器上的 LANClaw 和 LANChat 可以同时使用 8888 端口，互不冲突。
 
 > [!TIP]
-> 当 LANClaw 使用不同端口时，在 LANChat 的**手动发现**功能中添加机器人的地址（`<IP>:<端口>`），即可跨端口自动发现。任一端收到心跳后，回复机制会让双方自动互相发现。
+> 当 LANClaw 使用不同端口时，在 LANChat 的**添加**功能中添加机器人的地址（`<IP>:<端口>`），即可跨端口发现。任一端收到心跳后，回复机制会让双方自动互相发现。
+
+### 配置
+
+复制 `config.example.json` 到 `~/.config/lanclaw/config.json`：
+
+```json
+{
+  "name": "PiBot",
+  "model": "",
+  "thinking": "off",
+  "port": 8888,
+  "files": null
+}
+```
+
+| 字段       | 说明                                                |
+|------------|-----------------------------------------------------|
+| `name`     | 机器人在 LANChat 上的显示名称                       |
+| `model`    | Pi 模型（空字符串 = 使用 Pi 默认模型）              |
+| `thinking` | Pi 思考级别: off, minimal, low, medium, high, xhigh |
+| `port`     | 监听端口（默认与 LANChat 使用相同端口 8888）    |
+| `files`    | 文件保存路径（`null` = 默认 `~/Downloads`）         |
+| `data`     | 数据目录（`null` = 默认 `~/.local/share/lanclaw`）  |
+
+命令行参数会覆盖配置文件中的对应设置。优先级：`--data` CLI > `data` 配置 > `~/.local/share/lanclaw`。
+
+## 工作原理
+
+```
+┌─────────┐  LANChat 协议       ┌──────────┐  pi --mode rpc   ┌──────┐
+│ LANChat  │ ◄─── UDP/TCP/WS ──► │ LANClaw  │ ─────────────────► │  Pi  │
+│  用户    │ ◄─── HTTP 文件 ──── │  (Rust)  │ ◄──────────────── │      │
+└─────────┘                      └──────────┘                  └──────┘
+```
+
+1. **UDP 发现** — LANClaw 像 LANChat 一样广播心跳，用户能看到机器人上线
+2. **心跳回复** — 收到其他设备的心跳时立即回复一条，不同端口/网段的设备无需手动配置即可自动发现
+3. **消息接收** — LANChat 用户通过 WebSocket/TCP 向 LANClaw 端口发送消息
+4. **AI 处理** — LANClaw 通过 JSONL RPC 协议（`pi --mode rpc`）向 Pi 发送 prompt，支持流式文本、思考过程、工具调用和工具结果
+5. **回复** — Pi 的文本回复流式返回给用户；Pi 生成的文件通过 HTTP 自动发送
+6. **文件处理** — 用户发送的文件保存到 `~/Downloads`（可配置）后传给 Pi 分析
+7. **卡住恢复** — 如果 RPC 因网络问题卡住，发送 `/new` 或 `/model` 命令可强制杀 pi 子进程并立即重启
+
+## 数据存储
+
+```
+~/.local/share/lanclaw/
+├── sessions/          # Pi session 文件（每个用户一个 .jsonl）
+├── tasks.json         # 定时任务存储
+├── skill.md           # 动态生成的 Pi 技能文件
+└── bot_id.txt         # 机器人持久化 UUID
+
+~/Downloads/           # 用户上传的文件（可配置）
+```
 
 ## 项目结构
 
