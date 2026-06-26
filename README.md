@@ -66,8 +66,9 @@ Copy `config.example.json` to `~/.config/lanclaw/config.json`:
 | `thinking` | Pi thinking level: off, minimal, low, medium, high, xhigh |
 | `port` | Listening port (same ports as LANChat) |
 | `files` | File save path (`null` = default `~/Downloads`) |
+| `data` | Data directory (`null` = default `~/.local/share/lanclaw`) |
 
-CLI flags override config file settings. Priority: `--files` CLI > `files` config > `~/Downloads`.
+CLI flags override config file settings. Priority: `--data` CLI > `data` config > `~/.local/share/lanclaw`.
 
 ## How It Works
 
@@ -127,6 +128,7 @@ lanclaw [OPTIONS]
       --thinking <THINKING>   Thinking level: off, minimal, low, medium, high, xhigh [default: off]
       --port <PORT>           Listening port [default: 8888]
       --files <FILES>         File save path [default: ~/Downloads]
+      --data <DATA>           Data directory [default: ~/.local/share/lanclaw]
 
 # Task management (called by Pi via bash)
 lanclaw task add <when> <prompt> --user-id <UUID> [OPTIONS]

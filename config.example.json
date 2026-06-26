@@ -3,5 +3,6 @@
   "model": "",
   "thinking": "off",
   "port": 8888,
-  "files": null
+  "files": null,
+  "data": null
 }

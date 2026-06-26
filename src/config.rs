@@ -11,6 +11,8 @@ pub struct Config {
     pub port: u16,
     /// 文件保存路径（可选），默认 ~/Downloads
     pub files: Option<String>,
+    /// 数据目录（可选），默认 ~/.local/share/lanclaw
+    pub data: Option<String>,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
             thinking: "off".to_string(),
             port: 8888,
             files: None,
+            data: None,
         }
     }
 }
@@ -36,8 +39,39 @@ pub fn config_path() -> PathBuf {
     dir.join("config.json")
 }
 
-pub fn data_dir() -> PathBuf {
+/// 有效数据目录（OnceLock，启动时通过 init_data_dir 设置）
+static EFFECTIVE_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 启动时初始化数据目录（仅调用一次）
+/// 优先级：CLI --data > 配置文件 data > 默认 ~/.local/share/lanclaw
+pub fn init_data_dir(cli_override: Option<&str>) -> PathBuf {
+    let cfg = Config::load();
+    let path = resolve_data_path(cli_override, cfg.data.as_deref());
+    let _ = std::fs::create_dir_all(&path);
+    let _ = EFFECTIVE_DATA_DIR.set(path.clone());
+    tracing::info!("[Config] 数据目录: {}", path.display());
+    path
+}
+
+fn resolve_data_path(cli: Option<&str>, config: Option<&str>) -> PathBuf {
+    // CLI 最高优先级
+    if let Some(p) = cli {
+        return expand_tilde(p);
+    }
+    // 配置文件次之
+    if let Some(p) = config {
+        return expand_tilde(p);
+    }
+    // 默认
     project_dirs().data_dir().to_path_buf()
+}
+
+pub fn data_dir() -> PathBuf {
+    EFFECTIVE_DATA_DIR.get().cloned().unwrap_or_else(|| {
+        let path = project_dirs().data_dir().to_path_buf();
+        let _ = std::fs::create_dir_all(&path);
+        path
+    })
 }
 
 impl Config {

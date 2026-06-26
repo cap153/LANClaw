@@ -66,8 +66,9 @@ lanclaw --files ~/Downloads/lanclaw
 | `thinking` | Pi 思考级别: off, minimal, low, medium, high, xhigh |
 | `port` | 监听端口（与 LANChat 协议使用相同端口） |
 | `files` | 文件保存路径（`null` = 默认 `~/Downloads`） |
+| `data` | 数据目录（`null` = 默认 `~/.local/share/lanclaw`） |
 
-命令行参数会覆盖配置文件中的对应设置。优先级：`--files` CLI > `files` 配置 > `~/Downloads`。
+命令行参数会覆盖配置文件中的对应设置。优先级：`--data` CLI > `data` 配置 > `~/.local/share/lanclaw`。
 
 ## 工作原理
 
@@ -127,6 +128,7 @@ lanclaw [参数]
       --thinking <THINKING>   思考级别: off, minimal, low, medium, high, xhigh [default: off]
       --port <PORT>           监听端口 [default: 8888]
       --files <FILES>         文件保存路径 [default: ~/Downloads]
+      --data <DATA>           数据目录 [default: ~/.local/share/lanclaw]
 
 # 定时任务管理（由 Pi 通过 bash 调用）
 lanclaw task add <时间> --user-id <用户UUID> [参数]

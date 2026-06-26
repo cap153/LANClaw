@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long)]
     files: Option<String>,
 
+    /// 数据目录（默认 ~/.local/share/lanclaw）
+    #[arg(long)]
+    data: Option<String>,
+
     /// 子命令（供 pi 的 bash 工具调用）
     #[command(subcommand)]
     command: Option<TaskCommand>,
@@ -215,6 +219,9 @@ async fn main() {
     println!("╚══════════════════════════════════╝");
 
     let cfg = config::Config::load();
+
+    // 初始化数据目录（CLI > 配置 > 默认）
+    let data_dir = config::init_data_dir(cli.data.as_deref());
     let bot_id = config::bot_id();
 
     // 使用 CLI 参数覆盖配置（不保存到文件）
@@ -232,7 +239,7 @@ async fn main() {
     println!("  Model:       {}", if bot_model.is_empty() { "pi default" } else { &bot_model });
     println!("  Thinking:    {}", bot_thinking);
     println!();
-    println!("  Data:        {}", config::data_dir().display());
+    println!("  Data:        {}", data_dir.display());
     println!("  Sessions:    {}", config::sessions_dir().display());
     println!("  Files:       {}", files_dir.display());
     println!();
