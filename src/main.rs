@@ -139,12 +139,12 @@ async fn main() {
                         actions.push(models::TaskAction::Exec { command: cmd.clone() });
                     }
                     if actions.is_empty() {
-                        eprintln!("❌ 请指定至少一个 --reply 或 --exec");
+                        eprintln!("❌ Specify at least one --reply or --exec");
                     } else {
                         match scheduler::add_task(
                             &when, &actions, &user_id, &user_name,
                         ) {
-                            Ok(id) => println!("✅ 任务已创建 (ID: {})", id),
+                            Ok(id) => println!("✅ Task created (ID: {})", id),
                             Err(e) => eprintln!("❌ {}", e),
                         }
                     }
@@ -175,7 +175,7 @@ async fn main() {
                 let content = match std::fs::read_to_string(&peers_path) {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("❌ 无法读取 peers 信息，请确认 LANClaw 正在运行");
+                        eprintln!("❌ Cannot read peers info, make sure LANClaw is running");
                         return;
                     }
                 };
@@ -184,17 +184,17 @@ async fn main() {
                 let peer = match peers_map.get(&user_id) {
                     Some(p) => p.clone(),
                     None => {
-                        eprintln!("❌ 未找到用户 {}，用户可能不在线", &user_id.chars().take(8).collect::<String>());
+                        eprintln!("❌ User {} not found, may be offline", &user_id.chars().take(8).collect::<String>());
                         return;
                     }
                 };
                 if peer.is_offline {
-                    eprintln!("❌ 用户不在线，无法发送文件");
+                    eprintln!("❌ User not online, cannot send file");
                     return;
                 }
                 let file_path = std::path::PathBuf::from(&path);
                 if !file_path.exists() {
-                    eprintln!("❌ 文件不存在: {}", path);
+                    eprintln!("❌ File not found: {}", path);
                     return;
                 }
                 let my_id = config::bot_id();
@@ -205,8 +205,8 @@ async fn main() {
                 match network::file::send_file_to_peer(
                     &peer.addr, &my_id, &peer.name, &file_path, sender_msg_id, peer.available_memory_mb,
                 ).await {
-                    Ok(_) => println!("✅ 文件已发送: {}  →  {}", path, &user_id.chars().take(8).collect::<String>()),
-                    Err(e) => eprintln!("❌ 发送失败: {}", e),
+                    Ok(_) => println!("✅ File sent: {}  →  {}", path, &user_id.chars().take(8).collect::<String>()),
+                    Err(e) => eprintln!("❌ Send failed: {}", e),
                 }
             },
         }
@@ -264,7 +264,7 @@ async fn main() {
             c
         }
         Err(e) => {
-            eprintln!("❌ [RPC] 启动失败: {}", e);
+            eprintln!("❌ [RPC] Start failed: {}", e);
             return;
         }
     };
@@ -341,7 +341,7 @@ async fn main() {
                     let _ = send_handle.await;
                 }
                 Err(e) => {
-                    let reply = format!("❌ 文件处理失败: {}", e);
+                    let reply = format!("❌ File processing failed: {}", e);
                     let _ = messaging::send_text_message(
                         &addr,
                         fp_bot_id.clone(),

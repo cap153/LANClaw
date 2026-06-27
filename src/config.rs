@@ -30,7 +30,7 @@ impl Default for Config {
 
 /// Get project directories (Linux: ~/.local/share/lanclaw/, ~/.config/lanclaw/)
 pub fn project_dirs() -> ProjectDirs {
-    ProjectDirs::from("", "", "lanclaw").expect("无法获取项目目录")
+    ProjectDirs::from("", "", "lanclaw").expect("cannot determine project directory")
 }
 
 pub fn config_path() -> PathBuf {
@@ -49,7 +49,7 @@ pub fn init_data_dir(cli_override: Option<&str>) -> PathBuf {
     let path = resolve_data_path(cli_override, cfg.data.as_deref());
     let _ = std::fs::create_dir_all(&path);
     let _ = EFFECTIVE_DATA_DIR.set(path.clone());
-    tracing::info!("[Config] 数据目录: {}", path.display());
+    tracing::info!("[Config] data dir: {}", path.display());
     path
 }
 
@@ -84,7 +84,7 @@ impl Config {
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 serde_json::from_str(&content).unwrap_or_else(|e| {
-                    eprintln!("[config] 解析失败 ({}), 使用默认配置", e);
+                    eprintln!("[config] parse failed ({}), using defaults", e);
                     let cfg = Config::default();
                     cfg.save();
                     cfg
@@ -150,7 +150,7 @@ pub fn init_files_dir(cli_override: Option<&str>) -> PathBuf {
     let path = resolve_files_path(cli_override, cfg.files.as_deref());
     let _ = std::fs::create_dir_all(&path);
     let _ = EFFECTIVE_FILES_DIR.set(path.clone());
-    tracing::info!("[Config] 文件保存目录: {}", path.display());
+    tracing::info!("[Config] file save dir: {}", path.display());
     path
 }
 

@@ -56,17 +56,17 @@ pub async fn handle_message(
             Ok(_) => {
                 match config.rpc.reset_session(&from_id).await {
                     Ok(_) => {
-                        let reply = "🗑️ Session 已重置，开始全新对话。发送任意消息开始。";
+                        let reply = "🗑️ Session reset. Start a new conversation. Send any message to begin.";
                         send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
                     }
                     Err(e) => {
-                        let reply = format!("❌ 重置失败: {}", e);
+                        let reply = format!("❌ Reset failed: {}", e);
                         send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
                     }
                 }
             }
             Err(e) => {
-                let reply = format!("❌ 重启 pi 失败: {}", e);
+                let reply = format!("❌ Pi restart failed: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
@@ -90,15 +90,15 @@ pub async fn handle_message(
                 let current_line = match &current_model {
                     Some(m) => {
                         let name = if !m.name.is_empty() { &m.name } else { &m.id };
-                        format!("🟢 当前模型: {} ({})", name, m.provider)
+                        format!("🟢 Current: {} ({})", name, m.provider)
                     }
-                    None => "🟢 当前模型: pi 默认".to_string(),
+                    None => "🟢 Current: pi default".to_string(),
                 };
 
                 match config.rpc.get_available_models().await {
                     Ok(models) => {
                         if models.is_empty() {
-                            let reply = format!("{}\n\n⚠️ pi 配置中没有找到可用模型。请先在 pi 中配置至少一个模型。", current_line);
+                            let reply = format!("{}\n\n⚠️ No models available in pi config. Please configure at least one model in pi.", current_line);
                             send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
                             return;
                         }
@@ -108,13 +108,13 @@ pub async fn handle_message(
                         send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
                     }
                     Err(e) => {
-                        let reply = format!("{}\n\n❌ 查询模型列表失败: {}", current_line, e);
+                        let reply = format!("{}\n\n❌ Failed to fetch model list: {}", current_line, e);
                         send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
                     }
                 }
             }
             Err(e) => {
-                let reply = format!("❌ 重启 pi 失败: {}", e);
+                let reply = format!("❌ Pi restart failed: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
@@ -130,7 +130,7 @@ pub async fn handle_message(
         cancel_user_bash(config, &from_id).await;
         // 检查是否正在切换
         if config.switching_model.load(Ordering::Acquire) {
-            let reply = "⏳ 正在切换模型中，请稍候...";
+            let reply = "⏳ Switching model, please wait...";
             send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
             return;
         }
@@ -138,7 +138,7 @@ pub async fn handle_message(
         let selector = content.trim_start_matches("/model select ").trim().to_string();
         let parts: Vec<&str> = selector.splitn(2, ' ').collect();
         if parts.len() < 2 {
-            let reply = "⚠️ 用法: /model select <provider> <modelId>";
+            let reply = "⚠️ Usage: /model select <provider> <modelId>";
             send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             return;
         }
@@ -155,11 +155,11 @@ pub async fn handle_message(
         let thinking = cfg.thinking.clone();
         match config.rpc.restart(model_id, &thinking).await {
             Ok(_) => {
-                let reply = format!("✅ 已切换到模型: {}，pi 子进程已重启", model_id);
+                let reply = format!("✅ Switched to model: {}, pi restarted", model_id);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
             Err(e) => {
-                let reply = format!("❌ 模型切换失败: {}", e);
+                let reply = format!("❌ Model switch failed: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, Some(msg.timestamp + 1)).await;
             }
         }
@@ -177,7 +177,7 @@ pub async fn handle_message(
         };
 
         if cmd.is_empty() {
-            let reply = "⚠️ 请在 `!` 或 `!!` 后输入要执行的命令";
+            let reply = "⚠️ Enter a command after `!` or `!!`";
             send_to_peer(&peers, &from_id, &config.name, reply, config, Some(msg.timestamp + 1)).await;
             return;
         }
@@ -232,7 +232,7 @@ pub async fn handle_message(
                 let _ = handle.await;
             }
             Err(e) => {
-                let reply = format!("❌ pi 调用失败: {}", e);
+                let reply = format!("❌ Pi call failed: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
             }
         }
@@ -246,7 +246,7 @@ pub async fn handle_message(
                 }
             }
             Err(e) => {
-                let reply = format!("❌ pi 调用失败: {}", e);
+                let reply = format!("❌ Pi call failed: {}", e);
                 send_to_peer(&peers, &from_id, &config.name, &reply, config, None).await;
             }
         }
@@ -346,7 +346,7 @@ async fn execute_bash(command: &str, cancel: CancellationToken) -> BashResult {
     {
         Ok(c) => c,
         Err(e) => {
-            let line = format!("命令启动失败: {}", e);
+            let line = format!("Command failed to start: {}", e);
             return BashResult {
                 output: line.clone(),
                 is_error: true,
@@ -399,7 +399,7 @@ async fn execute_bash(command: &str, cancel: CancellationToken) -> BashResult {
     match exit_status {
         None => {
             let truncated = truncate_output(&combined);
-            let msg = format!("命令被取消。此前输出（{} 字节）：\n{}\n", combined.len(), truncated);
+            let msg = format!("Command cancelled. Output before cancel ({} bytes):\n{}\n", combined.len(), truncated);
             BashResult {
                 output: msg.clone(),
                 is_error: true,
@@ -453,4 +453,3 @@ fn format_tool_result(command: &str, output: &str, is_error: bool) -> String {
     });
     segments.to_string()
 }
-

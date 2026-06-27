@@ -17,9 +17,9 @@ fn load_tasks() -> Result<TaskStore, String> {
         .write(true)
         .create(true)
         .open(&path)
-        .map_err(|e| format!("打开 tasks.json 失败: {}", e))?;
+        .map_err(|e| format!("open tasks.json failed: {}", e))?;
 
-    file.lock_shared().map_err(|e| format!("加锁失败: {}", e))?;
+    file.lock_shared().map_err(|e| format!("lock failed: {}", e))?;
 
     let mut content = String::new();
     file.read_to_string(&mut content).unwrap_or_default();
@@ -28,7 +28,7 @@ fn load_tasks() -> Result<TaskStore, String> {
         TaskStore { tasks: Vec::new() }
     } else {
         serde_json::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("[Scheduler] tasks.json 解析失败: {}，使用空列表", e);
+            eprintln!("[Scheduler] tasks.json parse failed: {}，using empty list", e);
             TaskStore { tasks: Vec::new() }
         })
     };
@@ -48,11 +48,11 @@ fn save_tasks(store: &TaskStore) -> Result<(), String> {
         .create(true)
         .truncate(true)
         .open(&path)
-        .map_err(|e| format!("打开 tasks.json 失败: {}", e))?;
+        .map_err(|e| format!("open tasks.json failed: {}", e))?;
 
-    file.lock_exclusive().map_err(|e| format!("加锁失败: {}", e))?;
-    let content = serde_json::to_string_pretty(store).map_err(|e| format!("序列化失败: {}", e))?;
-    writeln!(&file, "{}", content).map_err(|e| format!("写入失败: {}", e))?;
+    file.lock_exclusive().map_err(|e| format!("lock failed: {}", e))?;
+    let content = serde_json::to_string_pretty(store).map_err(|e| format!("serialize failed: {}", e))?;
+    writeln!(&file, "{}", content).map_err(|e| format!("write failed: {}", e))?;
     let _ = file.unlock();
     Ok(())
 }
@@ -64,10 +64,10 @@ fn actions_summary(actions: &[TaskAction], max_chars: usize) -> String {
     for a in actions {
         match a {
             TaskAction::Reply { message } => {
-                parts.push(format!("回复: {}", message.chars().take(40).collect::<String>()));
+                parts.push(format!("reply: {}", message.chars().take(40).collect::<String>()));
             }
             TaskAction::Exec { command } => {
-                parts.push(format!("执行: {}", command.chars().take(40).collect::<String>()));
+                parts.push(format!("exec: {}", command.chars().take(40).collect::<String>()));
             }
         }
     }
@@ -89,7 +89,7 @@ pub fn add_task(
     creator_name: &str,
 ) -> Result<String, String> {
     if actions.is_empty() {
-        return Err("至少需要一个动作".to_string());
+        return Err("at least one action required".to_string());
     }
     let mut store = load_tasks()?;
     let schedule = parse_when(when)?;
@@ -116,46 +116,46 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
     if let Some(time) = when.strip_prefix("daily:") {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() == 2 {
-            let h: u32 = parts[0].parse().map_err(|_| "无效的小时")?;
-            let m: u32 = parts[1].parse().map_err(|_| "无效的分钟")?;
+            let h: u32 = parts[0].parse().map_err(|_| "invalid hour")?;
+            let m: u32 = parts[1].parse().map_err(|_| "invalid minute")?;
             if h < 24 && m < 60 {
                 return Ok(TaskSchedule::Daily { time: format!("{:02}:{:02}", h, m) });
             }
         }
-        return Err("格式: daily:HH:MM".to_string());
+        return Err("format: daily:HH:MM".to_string());
     }
     if let Some(rest) = when.strip_prefix("monthly:") {
         let parts: Vec<&str> = rest.split(':').collect();
         if parts.len() == 3 {
-            let day = if parts[0] == "last" { 0u32 } else { parts[0].parse().map_err(|_| "无效的日")? };
-            let h: u32 = parts[1].parse().map_err(|_| "无效的小时")?;
-            let m: u32 = parts[2].parse().map_err(|_| "无效的分钟")?;
+            let day = if parts[0] == "last" { 0u32 } else { parts[0].parse().map_err(|_| "invalid day")? };
+            let h: u32 = parts[1].parse().map_err(|_| "invalid hour")?;
+            let m: u32 = parts[2].parse().map_err(|_| "invalid minute")?;
             if (day == 0 || (1..=31).contains(&day)) && h < 24 && m < 60 {
                 return Ok(TaskSchedule::Monthly { day, time: format!("{:02}:{:02}", h, m) });
             }
         }
-        return Err("格式: monthly:DD:HH:MM 或 monthly:last:HH:MM".to_string());
+        return Err("format: monthly:DD:HH:MM or monthly:last:HH:MM".to_string());
     }
     if let Some(rest) = when.strip_prefix("yearly:") {
         let parts: Vec<&str> = rest.split(':').collect();
         if parts.len() == 3 {
             let date_parts: Vec<&str> = parts[0].split('-').collect();
             if date_parts.len() == 2 {
-                let month: u32 = date_parts[0].parse().map_err(|_| "无效的月份")?;
-                let day: u32 = date_parts[1].parse().map_err(|_| "无效的日")?;
-                let h: u32 = parts[1].parse().map_err(|_| "无效的小时")?;
-                let m: u32 = parts[2].parse().map_err(|_| "无效的分钟")?;
+                let month: u32 = date_parts[0].parse().map_err(|_| "invalid month")?;
+                let day: u32 = date_parts[1].parse().map_err(|_| "invalid day")?;
+                let h: u32 = parts[1].parse().map_err(|_| "invalid hour")?;
+                let m: u32 = parts[2].parse().map_err(|_| "invalid minute")?;
                 if (1..=12).contains(&month) && (1..=31).contains(&day) && h < 24 && m < 60 {
                     return Ok(TaskSchedule::Yearly { month, day, time: format!("{:02}:{:02}", h, m) });
                 }
             }
         }
-        return Err("格式: yearly:MM-DD:HH:MM".to_string());
+        return Err("format: yearly:MM-DD:HH:MM".to_string());
     }
     if let Some(rest) = when.strip_prefix("every:") {
         let secs = parse_duration(rest)?;
         if secs < 1 {
-            return Err("间隔至少 1 秒".to_string());
+            return Err("interval must be at least 1 second".to_string());
         }
         return Ok(TaskSchedule::Every { interval_secs: secs });
     }
@@ -165,51 +165,51 @@ fn parse_when(when: &str) -> Result<TaskSchedule, String> {
             let day = parts[0].to_lowercase();
             let valid_days = ["mon","tue","wed","thu","fri","sat","sun"];
             if valid_days.contains(&day.as_str()) {
-                let h: u32 = parts[1].parse().map_err(|_| "无效的小时")?;
-                let m: u32 = parts[2].parse().map_err(|_| "无效的分钟")?;
+                let h: u32 = parts[1].parse().map_err(|_| "invalid hour")?;
+                let m: u32 = parts[2].parse().map_err(|_| "invalid minute")?;
                 if h < 24 && m < 60 {
                     return Ok(TaskSchedule::Weekly { day, time: format!("{:02}:{:02}", h, m) });
                 }
             }
-            return Err("格式: weekly:day:HH:MM".to_string());
+            return Err("format: weekly:day:HH:MM".to_string());
         }
     }
     if let Some(n) = when.strip_suffix('s').or_else(|| when.strip_suffix("秒")) {
-        let secs: f64 = n.parse().map_err(|_| "无效的时间")?;
+        let secs: f64 = n.parse().map_err(|_| "invalid time")?;
         let execute_at = Local::now().timestamp() as u64 + secs as u64;
         return Ok(TaskSchedule::Once { execute_at });
     }
     if let Some(n) = when.strip_suffix("min") {
-        let minutes: f64 = n.parse().map_err(|_| "无效的时间")?;
+        let minutes: f64 = n.parse().map_err(|_| "invalid time")?;
         let execute_at = Local::now().timestamp() as u64 + (minutes * 60.0) as u64;
         return Ok(TaskSchedule::Once { execute_at });
     }
     if let Some(n) = when.strip_suffix('h') {
-        let hours: f64 = n.parse().map_err(|_| "无效的时间")?;
+        let hours: f64 = n.parse().map_err(|_| "invalid time")?;
         let execute_at = Local::now().timestamp() as u64 + (hours * 3600.0) as u64;
         return Ok(TaskSchedule::Once { execute_at });
     }
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M") {
         let execute_at = dt.and_utc().timestamp() as u64;
         if execute_at <= Local::now().timestamp() as u64 {
-            return Err("指定的时间已过去".to_string());
+            return Err("specified time has passed".to_string());
         }
         return Ok(TaskSchedule::Once { execute_at });
     }
-    Err("无法解析时间，支持的格式: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM, monthly:DD:HH:MM, monthly:last:HH:MM, yearly:MM-DD:HH:MM, 2026-06-15T09:00".to_string())
+    Err("cannot parse time. Supported formats: 30s, 30min, 2h, every:10s, daily:HH:MM, weekly:day:HH:MM, monthly:DD:HH:MM, monthly:last:HH:MM, yearly:MM-DD:HH:MM, 2026-06-15T09:00".to_string())
 }
 
 /// 解析间隔时长
 fn parse_duration(s: &str) -> Result<u64, String> {
     if let Some(n) = s.strip_suffix('s') {
-        Ok(n.parse::<f64>().map_err(|_| "无效时间")? as u64)
+        Ok(n.parse::<f64>().map_err(|_| "invalid time")? as u64)
     } else if let Some(n) = s.strip_suffix("min") {
-        Ok((n.parse::<f64>().map_err(|_| "无效时间")? * 60.0) as u64)
+        Ok((n.parse::<f64>().map_err(|_| "invalid time")? * 60.0) as u64)
     } else if let Some(n) = s.strip_suffix('h') {
-        Ok((n.parse::<f64>().map_err(|_| "无效时间")? * 3600.0) as u64)
+        Ok((n.parse::<f64>().map_err(|_| "invalid time")? * 3600.0) as u64)
     } else {
         // 纯数字默认秒
-        s.parse::<u64>().map_err(|_| "格式: every:10s / every:5min / every:2h".to_string())
+        s.parse::<u64>().map_err(|_| "format: every:10s / every:5min / every:2h".to_string())
     }
 }
 
@@ -217,35 +217,35 @@ fn parse_duration(s: &str) -> Result<u64, String> {
 pub fn list_tasks() -> Result<String, String> {
     let store = load_tasks()?;
     if store.tasks.is_empty() {
-        return Ok("📋 暂无定时任务".to_string());
+        return Ok("📋 No scheduled tasks".to_string());
     }
 
-    let mut output = String::from("📋 定时任务列表:\n\n");
+    let mut output = String::from("📋 Scheduled tasks:\n\n");
     for task in &store.tasks {
         let schedule_str = match &task.schedule {
             TaskSchedule::Once { execute_at } => {
                 let dt = chrono::DateTime::from_timestamp(*execute_at as i64, 0)
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| execute_at.to_string());
-                format!("单次 @ {}", dt)
+                format!("once @ {}", dt)
             }
-            TaskSchedule::Daily { time } => format!("每天 {}", time),
-            TaskSchedule::Weekly { day, time } => format!("每周{} {}", day, time),
+            TaskSchedule::Daily { time } => format!("daily {}", time),
+            TaskSchedule::Weekly { day, time } => format!("weekly {} {}", day, time),
             TaskSchedule::Monthly { day, time } => {
                 if *day == 0 {
-                    format!("每月末 {}", time)
+                    format!("monthly last day {}", time)
                 } else {
-                    format!("每月 {} 日 {}", day, time)
+                    format!("monthly day {} {}", day, time)
                 }
             }
-            TaskSchedule::Yearly { month, day, time } => format!("每年 {:02}-{:02} {}", month, day, time),
+            TaskSchedule::Yearly { month, day, time } => format!("yearly {:02}-{:02} {}", month, day, time),
             TaskSchedule::Every { interval_secs } => {
                 if *interval_secs < 60 {
-                    format!("每 {} 秒", interval_secs)
+                    format!("every {}s", interval_secs)
                 } else if *interval_secs < 3600 {
-                    format!("每 {} 分钟", interval_secs / 60)
+                    format!("every {}min", interval_secs / 60)
                 } else {
-                    format!("每 {} 小时", interval_secs / 3600)
+                    format!("every {}h", interval_secs / 3600)
                 }
             }
         };
@@ -258,7 +258,7 @@ pub fn list_tasks() -> Result<String, String> {
         let summary = actions_summary(&task.actions, 100);
 
         output.push_str(&format!(
-            "  {} [{}] {}\n    创建者: {}\n    状态: {} | 执行 {} 次\n    动作: {}\n\n",
+            "  {} [{}] {}\n    creator: {}\n    status: {} | runs: {}\n    actions: {}\n\n",
             status_icon,
             task.id.chars().take(8).collect::<String>(),
             schedule_str,
@@ -280,12 +280,12 @@ pub fn cancel_task(task_id: &str) -> Result<String, String> {
             let summary = actions_summary(&store.tasks[i].actions, 60);
             store.tasks[i].status = "cancelled".to_string();
             save_tasks(&store)?;
-            Ok(format!("✅ 任务已取消: {}", summary))
+            Ok(format!("✅ Task cancelled: {}", summary))
         }
         None => {
             let exists = store.tasks.iter().any(|t| t.id == task_id || t.id.starts_with(task_id));
-            if exists { Err("任务状态不是 pending，无法取消".to_string()) }
-            else { Err("未找到该任务".to_string()) }
+            if exists { Err("task status is not pending, cannot cancel".to_string()) }
+            else { Err("task not found".to_string()) }
         }
     }
 }
@@ -298,15 +298,15 @@ pub fn task_logs(task_id: &str) -> Result<String, String> {
         Some(t) => {
             let summary = actions_summary(&t.actions, 40);
             if t.logs.is_empty() {
-                Ok(format!("📋 任务「{}」暂无执行记录", summary))
+                Ok(format!("📋 Task \"{}\" has no execution logs", summary))
             } else {
-                let mut output = format!("📋 任务「{}」执行记录 (共 {} 次):\n\n", summary, t.logs.len());
+                let mut output = format!("📋 Task \"{}\" execution logs ({} runs):\n\n", summary, t.logs.len());
                 for (i, log) in t.logs.iter().enumerate() {
                     let dt = chrono::DateTime::from_timestamp(log.executed_at as i64, 0)
                         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_else(|| log.executed_at.to_string());
                     output.push_str(&format!(
-                        "  #{}\n  时间: {}\n  耗时: {}s\n  结果: {}\n\n",
+                        "  #{}\n  time: {}\n  duration: {}s\n  result: {}\n\n",
                         i + 1, dt, log.duration_secs,
                         log.result.chars().take(200).collect::<String>()
                     ));
@@ -314,7 +314,7 @@ pub fn task_logs(task_id: &str) -> Result<String, String> {
                 Ok(output)
             }
         }
-        None => Err("未找到该任务".to_string()),
+        None => Err("task not found".to_string()),
     }
 }
 
@@ -336,7 +336,7 @@ pub async fn start_scheduler(
             interval.tick().await;
         }
         if let Err(e) = tick(&send_fn).await {
-            eprintln!("[Scheduler] tick 错误: {}", e);
+            eprintln!("[Scheduler] tick error: {}", e);
         }
     }
 }
@@ -353,11 +353,11 @@ async fn tick(
             .filter(|(nr, _)| *nr <= now)
             .map(|(_, t)| (t.id.clone(), t))
             .collect(),
-        Err(e) => { eprintln!("[Scheduler] 加载任务失败: {}", e); return Ok(()); }
+        Err(e) => { eprintln!("[Scheduler] load tasks failed: {}", e); return Ok(()); }
     };
 
     for (task_id, task_info) in &due_tasks {
-        tracing::info!("[Scheduler] 执行: {}", actions_summary(&task_info.actions, 60));
+        tracing::info!("[Scheduler] execute: {}", actions_summary(&task_info.actions, 60));
         let start = std::time::Instant::now();
 
         let mut output_parts: Vec<String> = Vec::new();
@@ -386,11 +386,11 @@ async fn tick(
                                 output_parts.push(format!("[stderr]\n{}", err_text));
                             }
                             if !has_out && !has_err {
-                                output_parts.push(format!("(命令执行成功，exit={})", out.status.code().unwrap_or(-1)));
+                                output_parts.push(format!("(command executed successfully, exit={})", out.status.code().unwrap_or(-1)));
                             }
                         }
                         Err(e) => {
-                            output_parts.push(format!("命令执行失败: {}", e));
+                            output_parts.push(format!("command execution failed: {}", e));
                         }
                     }
                 }
@@ -419,14 +419,14 @@ async fn tick(
 
                 // 单次任务：发送通知后删除；重复任务：仅保存日志
                 if is_once {
-                    let msg = format!("⏰ 定时任务完成\n\n{}", result_text);
+                    let msg = format!("⏰ Timer task completed\n\n{}", result_text);
                     send_fn(creator_id, msg);
                     store.tasks.retain(|t| t.id != *task_id);
                 }
 
                 let _ = save_tasks(&store);
             }
-            Err(e) => eprintln!("[Scheduler] 加载任务失败: {}", e),
+            Err(e) => eprintln!("[Scheduler] load tasks failed: {}", e),
         }
     }
 
