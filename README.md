@@ -26,6 +26,24 @@ LANClaw registers itself as a peer on the LANChat network, receives messages and
 - [Pi](https://pi.dev) installed and configured (API key / login)
 - A local network with [LANChat](https://github.com/cap153/LANChat) users
 
+### AUR
+
+```bash
+paru -S lanclaw-bin
+```
+
+### Releases
+
+[https://github.com/cap153/LANClaw/releases](https://github.com/cap153/LANClaw/releases)
+
+### Build from Source
+
+```bash
+git clone https://github.com/cap153/LANClaw.git
+cd LANClaw
+cargo build --release
+```
+
 ### Run
 
 ```bash

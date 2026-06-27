@@ -26,6 +26,24 @@ LANClaw 以 LANChat 网络中的对等节点身份运行，接收在线用户的
 - 已安装并配置好 [Pi](https://pi.dev)（API key / 登录）
 - 局域网中有使用 [LANChat](https://github.com/cap153/LANChat) 的用户
 
+### AUR
+
+```bash
+paru -S lanclaw-bin
+```
+
+### Releases
+
+[https://github.com/cap153/LANClaw/releases](https://github.com/cap153/LANClaw/releases)
+
+### 编译
+
+```bash
+git clone https://github.com/cap153/LANClaw.git
+cd LANClaw
+cargo build --release
+```
+
 ### 运行
 
 ```bash
