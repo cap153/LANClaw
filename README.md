@@ -160,10 +160,10 @@ CLI flags override config file settings. Priority: `--data` CLI > `data` config 
 ## How It Works
 
 ```
-┌─────────┐  LANChat Protocol   ┌──────────┐  pi --mode rpc   ┌──────┐
-│ LANChat  │ ◄─── UDP/TCP/WS ──► │ LANClaw  │ ─────────────────► │  Pi  │
-│  Users   │ ◄─── HTTP file ──── │  (Rust)  │ ◄──────────────── │      │
-└─────────┘                      └──────────┘                  └──────┘
+┌─────────┐    LANChat Protocol ┌──────────┐  pi --mode rpc     ┌──────┐
+│ LANChat │ ◄─── UDP/TCP/WS ──► │ LANClaw  │ ─────────────────► │  Pi  │
+│  Users  │ ◄─── HTTP file ──── │  (Rust)  │ ◄────────────────  │      │
+└─────────┘                     └──────────┘                    └──────┘
 ```
 
 1. **UDP Discovery** — LANClaw broadcasts heartbeats like any LANChat peer, users see it online
