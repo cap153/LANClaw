@@ -19,6 +19,23 @@ LANClaw registers itself as a peer on the LANChat network, receives messages and
 - 🔁 **Auto retry** — retries up to 3 times on empty RPC responses; allows empty when tool calls are present
 - ⚡ **Interruptible** — send `/new` or `/model` to force-interrupt a stuck RPC and recover immediately
 
+## Usage for LANChat Users
+
+Users on your LANChat network will see the bot in their peer list. They can:
+
+- **Send text** — talk to the bot, it responds via Pi
+- **Send files/images** — the bot analyzes them with Pi
+- **Create reminders** — say "remind me in 30 minutes" and Pi creates a scheduled task
+- **Query tasks** — ask "what tasks are scheduled?" and Pi checks
+- **Switch model** — send `/model` to list available models, `/model select <provider> <modelId>` to switch
+- **Reset session** — send `/new` to start a fresh conversation (also interrupts stuck RPC)
+- **Execute commands** — send `! command` to run bash commands, `!! command` to run silently
+  - `!` command outputs are sent to Pi as context on your **next text message**
+  - Multiple `!` commands stack up; all their outputs are sent together on the next message
+  - `!!` commands run silently — output is returned to you but **not** sent to Pi
+  - **Interruption**: sending any message (text, `/new`, etc.) while a command is running will cancel it
+  - ⚠️ Avoid interactive/TUI commands like `nmtui` — while they can be interrupted by a new message, they may leave the terminal in an unexpected state
+
 ## Quick Start
 
 ### Prerequisites
@@ -63,22 +80,20 @@ lanclaw --port 8889
 lanclaw --files ~/Downloads/lanclaw
 ```
 
-## Usage for LANChat Users
+> [!TIP]
+> Specifying different ports `--port` and data paths `--data` allows you to run multiple instances.  
+> In LANChat's **Add** feature, enter `<IP>:<port>` to enable cross-port discovery.  
+> Once either end receives a heartbeat, the response mechanism will allow both parties to automatically detect each other.
 
-Users on your LANChat network will see the bot in their peer list. They can:
+## Port Conflicts
 
-- **Send text** — talk to the bot, it responds via Pi
-- **Send files/images** — the bot analyzes them with Pi
-- **Create reminders** — say "remind me in 30 minutes" and Pi creates a scheduled task
-- **Query tasks** — ask "what tasks are scheduled?" and Pi checks
-- **Switch model** — send `/model` to list available models, `/model select <provider> <modelId>` to switch
-- **Reset session** — send `/new` to start a fresh conversation (also interrupts stuck RPC)
-- **Execute commands** — send `! command` to run bash commands, `!! command` to run silently
-  - `!` command outputs are sent to Pi as context on your **next text message**
-  - Multiple `!` commands stack up; all their outputs are sent together on the next message
-  - `!!` commands run silently — output is returned to you but **not** sent to Pi
-  - **Interruption**: sending any message (text, `/new`, etc.) while a command is running will cancel it
-  - ⚠️ Avoid interactive/TUI commands like `nmtui` — while they can be interrupted by a new message, they may leave the terminal in an unexpected state
+If LANChat is already running on port 8888 on the same machine:
+
+```bash
+lanclaw --port 8889
+```
+
+LANClaw and LANChat on different machines can both use port 8888 without conflict.
 
 ## CLI Reference
 
@@ -119,20 +134,7 @@ lanclaw send-file <path> --user-id <UUID>
 | `monthly:last:09:00` | `lanclaw task add monthly:last:09:00 "..." --user-id <id>` | Repeat on last day of month at 09:00 |
 | `yearly:03-15:09:00` | `lanclaw task add yearly:03-15:09:00 "..." --user-id <id>` | Repeat yearly on Mar 15 at 09:00 |
 
-## Port Conflicts
-
-If LANChat is already running on port 8888 on the same machine:
-
-```bash
-lanclaw --port 8889
-```
-
-LANClaw and LANChat on different machines can both use port 8888 without conflict.
-
-> [!TIP]
-> When LANClaw runs on a different port, use LANChat's **Add** feature to add the bot's address (`<IP>:<port>`) for cross-port discovery. Once either side receives a heartbeat, the reply mechanism ensures both sides find each other.
-
-### Configuration
+## Configuration
 
 Copy `config.example.json` to `~/.config/lanclaw/config.json`:
 
